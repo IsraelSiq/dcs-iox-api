@@ -3,8 +3,6 @@
 import asyncio
 import json
 import logging
-import signal
-import sys
 import time
 import uvicorn
 
@@ -58,9 +56,8 @@ class IOXProtocol(asyncio.DatagramProtocol):
             shared.contacts = new_contacts
             shared.contacts_timestamp = payload.get("timestamp", time.time())
 
-        else:  # 'self' or legacy packet
+        else:  # 'self' or legacy packet (contacts embedded)
             try:
-                # contacts embedded in the self frame (mock_dcs style)
                 raw_contacts = payload.pop("contacts", [])
                 if raw_contacts:
                     new_contacts = {}
@@ -95,18 +92,17 @@ async def main():
     )
     log.info(f"[dcs-iox-api] UDP listening on {UDP_HOST}:{UDP_PORT}")
 
-    # FastAPI via uvicorn
-    # install_signal_handlers=False: lets asyncio.run() handle Ctrl+C
-    # on Windows (avoids immediate shutdown bug with nested event loops)
     config = uvicorn.Config(
         "server.api:app",
         host="0.0.0.0",
         port=8000,
         log_level="info",
         loop="asyncio",
-        install_signal_handlers=False,
     )
     server = uvicorn.Server(config)
+
+    # Disable uvicorn's own signal handlers so asyncio.run() owns Ctrl+C
+    server.install_signal_handlers = lambda: None
 
     try:
         await server.serve()
