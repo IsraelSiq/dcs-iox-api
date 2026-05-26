@@ -26,7 +26,7 @@ for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "iox-api"):
 log = logging.getLogger("iox-api")
 
 # ----------------------------------------------------------------
-# UDP listener — handles both 'self' and 'contacts' packets
+# UDP listener
 # ----------------------------------------------------------------
 UDP_HOST = "127.0.0.1"
 UDP_PORT = 7778
@@ -60,6 +60,19 @@ class IOXProtocol(asyncio.DatagramProtocol):
 
         else:  # 'self' or legacy packet
             try:
+                # contacts embedded in the self frame (mock_dcs style)
+                raw_contacts = payload.pop("contacts", [])
+                if raw_contacts:
+                    new_contacts = {}
+                    for c in raw_contacts:
+                        try:
+                            contact = ContactState(**c)
+                            new_contacts[contact.id] = contact
+                        except Exception:
+                            pass
+                    shared.contacts = new_contacts
+                    shared.contacts_timestamp = time.time()
+
                 shared.latest_state = AircraftState(**payload)
             except Exception as e:
                 log.warning(f"Failed to parse self packet: {e}")
@@ -83,31 +96,29 @@ async def main():
     log.info(f"[dcs-iox-api] UDP listening on {UDP_HOST}:{UDP_PORT}")
 
     # FastAPI via uvicorn
+    # install_signal_handlers=False: lets asyncio.run() handle Ctrl+C
+    # on Windows (avoids immediate shutdown bug with nested event loops)
     config = uvicorn.Config(
         "server.api:app",
         host="0.0.0.0",
         port=8000,
         log_level="info",
         loop="asyncio",
+        install_signal_handlers=False,
     )
     server = uvicorn.Server(config)
 
-    # Graceful shutdown (works on Windows too)
-    def _shutdown():
-        log.info("Shutdown signal received")
-        server.should_exit = True
-        transport.close()
-
-    if sys.platform != "win32":
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, _shutdown)
-
     try:
         await server.serve()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        log.info("Shutdown signal received")
     finally:
         transport.close()
         log.info("[dcs-iox-api] Shutdown complete")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
