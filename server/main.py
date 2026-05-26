@@ -1,126 +1,113 @@
 # server/main.py
+# Entry point: starts UDP listener + FastAPI server
 import asyncio
 import json
 import logging
 import signal
+import sys
 import time
-
 import uvicorn
 
-from server import state as shared
-from server.api import app
 from server.log_handler import BufferHandler
-from server.models import AircraftState
+from server import state as shared
+from server.models import AircraftState, ContactState
 
 # ----------------------------------------------------------------
-# Logging setup
+# Logging
 # ----------------------------------------------------------------
-fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
-buf_handler = BufferHandler()
-buf_handler.setFormatter(fmt)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "iox-api"):
+    logging.getLogger(name).addHandler(BufferHandler())
 
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(fmt)
-
-root = logging.getLogger()
-root.setLevel(logging.DEBUG)
-root.addHandler(stream_handler)
-root.addHandler(buf_handler)   # mirrors every log into shared.log_buffer
-
-log = logging.getLogger("iox-server")
+log = logging.getLogger("iox-api")
 
 # ----------------------------------------------------------------
-# UDP config
+# UDP listener — handles both 'self' and 'contacts' packets
 # ----------------------------------------------------------------
 UDP_HOST = "127.0.0.1"
 UDP_PORT = 7778
 
-# ----------------------------------------------------------------
-# UDP Protocol
-# ----------------------------------------------------------------
-class DCSProtocol(asyncio.DatagramProtocol):
+
+class IOXProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport):
-        log.info(f"UDP server listening on {UDP_HOST}:{UDP_PORT}")
+        self.transport = transport
+        log.info(f"UDP listener ready on {UDP_HOST}:{UDP_PORT}")
 
     def datagram_received(self, data: bytes, addr):
+        shared.packet_count += 1
         try:
-            payload = json.loads(data.decode("utf-8"))
-            shared.latest_state = AircraftState(**payload)
-            shared.packet_count += 1
+            payload = json.loads(data.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            return
 
-            if shared.packet_count % 30 == 0:  # log once per second (~30Hz)
-                s = shared.latest_state
-                log.info(
-                    f"[#{shared.packet_count}] {s.aircraft} | "
-                    f"ALT {s.alt_msl_m:.0f}m | "
-                    f"IAS {s.ias_ms * 1.944:.0f}kts | "
-                    f"HDG {s.heading_deg:.0f}\u00b0 | "
-                    f"MACH {s.mach:.2f}"
-                )
-        except Exception as e:
-            log.warning(f"Bad packet from {addr}: {e}")
+        msg_type = payload.get("msg_type", "self")
+
+        if msg_type == "contacts":
+            raw_contacts = payload.get("contacts", [])
+            new_contacts = {}
+            for c in raw_contacts:
+                try:
+                    contact = ContactState(**c)
+                    new_contacts[contact.id] = contact
+                except Exception:
+                    pass
+            shared.contacts = new_contacts
+            shared.contacts_timestamp = payload.get("timestamp", time.time())
+
+        else:  # 'self' or legacy packet
+            try:
+                shared.latest_state = AircraftState(**payload)
+            except Exception as e:
+                log.warning(f"Failed to parse self packet: {e}")
 
     def error_received(self, exc):
-        log.error(f"UDP error: {exc}")
-
-    def connection_lost(self, exc):
-        log.warning("UDP connection closed")
+        log.warning(f"UDP error: {exc}")
 
 
 # ----------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------
 async def main():
-    banner = [
-        "=" * 50,
-        " dcs-iox-api  |  UDP Listener",
-        f" Listening on udp://{UDP_HOST}:{UDP_PORT}",
-        "=" * 50,
-    ]
-    for line in banner:
-        log.info(line)
+    shared.start_time = time.time()
+    loop = asyncio.get_running_loop()
 
-    loop = asyncio.get_event_loop()
-
-    # Create UDP server
+    # UDP server
     transport, _ = await loop.create_datagram_endpoint(
-        DCSProtocol,
+        IOXProtocol,
         local_addr=(UDP_HOST, UDP_PORT),
     )
+    log.info(f"[dcs-iox-api] UDP listening on {UDP_HOST}:{UDP_PORT}")
 
-    # Graceful shutdown (Windows-compatible)
-    _stop = asyncio.Event()
-
-    def _shutdown(*_):
-        log.info("Shutdown signal received")
-        _stop.set()
-
-    signal.signal(signal.SIGINT, _shutdown)
-    signal.signal(signal.SIGTERM, _shutdown)
-
-    # Start uvicorn
+    # FastAPI via uvicorn
     config = uvicorn.Config(
-        app,
-        host="127.0.0.1",
+        "server.api:app",
+        host="0.0.0.0",
         port=8000,
         log_level="info",
-        loop="none",
+        loop="asyncio",
     )
     server = uvicorn.Server(config)
-    server_task = asyncio.create_task(server.serve())
 
-    log.info("FastAPI listening on http://127.0.0.1:8000")
-    log.info("Live log dashboard: http://127.0.0.1:8000/logs/view")
+    # Graceful shutdown (works on Windows too)
+    def _shutdown():
+        log.info("Shutdown signal received")
+        server.should_exit = True
+        transport.close()
 
-    await _stop.wait()
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, _shutdown)
 
-    log.info("Shutting down...")
-    server.should_exit = True
-    await server_task
-    transport.close()
+    try:
+        await server.serve()
+    finally:
+        transport.close()
+        log.info("[dcs-iox-api] Shutdown complete")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-else:
     asyncio.run(main())

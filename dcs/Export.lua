@@ -1,16 +1,16 @@
 -- =============================================================
 -- dcs-iox-api | Export.lua
 -- DCS World -> UDP socket bridge
--- Sends aircraft telemetry as JSON to localhost:7778
+-- Sends player telemetry + world contacts as JSON to localhost:7778
 -- Install path: %USERPROFILE%\Saved Games\DCS\Scripts\Export.lua
 -- =============================================================
 
 local IOX = {}
-IOX.host = "127.0.0.1"
-IOX.port = 7778
-IOX.socket = nil
-IOX.update_interval = 0.033  -- ~30Hz (seconds)
-IOX.last_update = 0
+IOX.host            = "127.0.0.1"
+IOX.port            = 7778
+IOX.socket          = nil
+IOX.update_interval = 0.033  -- ~30Hz
+IOX.radar_range_m   = 100000 -- 100 km
 
 -- ----------------------------------------------------------------
 -- Helpers
@@ -20,18 +20,41 @@ local function safe_number(v)
   if type(v) == "number" then return v else return 0 end
 end
 
+-- Minimal JSON encoder for flat tables (string/number/boolean values)
 local function json_encode(t)
   local parts = {}
   for k, v in pairs(t) do
     local val
-    if type(v) == "number"  then val = string.format("%.6f", v)
+    if     type(v) == "number"  then val = string.format("%.6f", v)
     elseif type(v) == "boolean" then val = tostring(v)
-    elseif type(v) == "string"  then val = '"' .. v .. '"'
+    elseif type(v) == "string"  then
+      -- escape quotes and backslashes
+      val = '"' .. v:gsub('\\', '\\\\'):gsub('"', '\\"') .. '"'
     else val = '""'
     end
-    table.insert(parts, '"' .. k .. '":' .. val)
+    table.insert(parts, '"' .. tostring(k) .. '":' .. val)
   end
   return "{" .. table.concat(parts, ",") .. "}"
+end
+
+-- Encode an array of flat tables as a JSON array
+local function json_encode_array(arr)
+  local items = {}
+  for _, t in ipairs(arr) do
+    table.insert(items, json_encode(t))
+  end
+  return "[" .. table.concat(items, ",") .. "]"
+end
+
+-- Haversine distance in metres between two lat/lon points
+local function haversine(lat1, lon1, lat2, lon2)
+  local R  = 6371000
+  local d1 = math.rad(lat2 - lat1)
+  local d2 = math.rad(lon2 - lon1)
+  local a  = math.sin(d1/2)^2
+              + math.cos(math.rad(lat1)) * math.cos(math.rad(lat2))
+              * math.sin(d2/2)^2
+  return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 end
 
 -- ----------------------------------------------------------------
@@ -39,13 +62,11 @@ end
 -- ----------------------------------------------------------------
 
 function LuaExportStart()
-  local lfs   = require("lfs")
   local socket = require("socket")
-
   IOX.socket = socket.udp()
   IOX.socket:setsockname("*", 0)
   IOX.socket:setpeername(IOX.host, IOX.port)
-  log.write("IOX", log.INFO, "[dcs-iox-api] Export started, streaming to " .. IOX.host .. ":" .. IOX.port)
+  log.write("IOX", log.INFO, "[dcs-iox-api] Export started -> " .. IOX.host .. ":" .. IOX.port)
 end
 
 function LuaExportStop()
@@ -58,26 +79,21 @@ end
 
 function LuaExportActivityNextEvent(t)
   local tNext = t + IOX.update_interval
+  if not IOX.socket then return tNext end
 
-  -- Only send if socket is open
-  if not IOX.socket then
-    return tNext
-  end
-
+  -- ================================================================
+  -- 1. PLAYER (self) data
+  -- ================================================================
   local ok, self_data = pcall(LoGetSelfData)
-  if not ok or not self_data then
-    return tNext
-  end
+  if not ok or not self_data then return tNext end
 
-  -- ---- Position ----
   local lat, lon, alt = 0, 0, 0
   if self_data.LatLongAlt then
     lat = safe_number(self_data.LatLongAlt.Lat)
     lon = safe_number(self_data.LatLongAlt.Long)
-    alt = safe_number(self_data.LatLongAlt.Alt)  -- meters MSL
+    alt = safe_number(self_data.LatLongAlt.Alt)
   end
 
-  -- ---- Velocity ----
   local vx, vy, vz = 0, 0, 0
   local speed_ms = 0
   if self_data.Velocity then
@@ -87,18 +103,12 @@ function LuaExportActivityNextEvent(t)
     speed_ms = math.sqrt(vx*vx + vy*vy + vz*vz)
   end
 
-  -- ---- Attitude ----
   local heading, pitch, bank = 0, 0, 0
-  local ok2, angles = pcall(LoGetMCPState)  -- fallback
-  local ok3, att = pcall(LoGetAccelerationUnits)
-
-  -- Heading from self_data
   if self_data.Heading then
     heading = math.deg(safe_number(self_data.Heading))
     if heading < 0 then heading = heading + 360 end
   end
 
-  -- Pitch and bank from LoGetADIPitchBankHeading
   local ok4, pbh = pcall(LoGetADIPitchBankHeading)
   if ok4 and pbh then
     pitch   = math.deg(safe_number(pbh.Pitch))
@@ -107,52 +117,42 @@ function LuaExportActivityNextEvent(t)
     if heading < 0 then heading = heading + 360 end
   end
 
-  -- ---- Engine / Fuel ----
   local fuel_internal = 0
   local ok5, fuel_data = pcall(LoGetFuelInternalFuelTotal)
-  if ok5 and fuel_data then
-    fuel_internal = safe_number(fuel_data)
-  end
+  if ok5 and fuel_data then fuel_internal = safe_number(fuel_data) end
 
-  -- ---- Throttle ----
   local throttle_1, throttle_2 = 0, 0
   local ok6, engine_data = pcall(LoGetEngineInfo)
-  if ok6 and engine_data then
-    if engine_data.RPM then
-      throttle_1 = safe_number(engine_data.RPM.left  or engine_data.RPM[1] or 0)
-      throttle_2 = safe_number(engine_data.RPM.right or engine_data.RPM[2] or 0)
-    end
+  if ok6 and engine_data and engine_data.RPM then
+    throttle_1 = safe_number(engine_data.RPM.left  or engine_data.RPM[1] or 0)
+    throttle_2 = safe_number(engine_data.RPM.right or engine_data.RPM[2] or 0)
   end
 
-  -- ---- Indicator speeds ----
   local ias_ms, tas_ms, mach, aoa, vvi = 0, 0, 0, 0, 0
-  local ok7, ind = pcall(LoGetIndicatedAirSpeed)
-  if ok7 then ias_ms = safe_number(ind) end
+  local ok7,  ind  = pcall(LoGetIndicatedAirSpeed);  if ok7  then ias_ms = safe_number(ind)  end
+  local ok8,  tas  = pcall(LoGetTrueAirSpeed);       if ok8  then tas_ms = safe_number(tas)  end
+  local ok9,  mac  = pcall(LoGetMachNumber);         if ok9  then mach   = safe_number(mac)  end
+  local ok10, aoar = pcall(LoGetAngleOfAttack);      if ok10 then aoa    = math.deg(safe_number(aoar)) end
+  local ok11, vvir = pcall(LoGetVerticalVelocity);   if ok11 then vvi    = safe_number(vvir) end
 
-  local ok8, tas_d = pcall(LoGetTrueAirSpeed)
-  if ok8 then tas_ms = safe_number(tas_d) end
-
-  local ok9, mach_d = pcall(LoGetMachNumber)
-  if ok9 then mach = safe_number(mach_d) end
-
-  local ok10, aoa_d = pcall(LoGetAngleOfAttack)
-  if ok10 then aoa = math.deg(safe_number(aoa_d)) end
-
-  local ok11, vvi_d = pcall(LoGetVerticalVelocity)
-  if ok11 then vvi = safe_number(vvi_d) end
-
-  -- ---- Altitude AGL ----
   local alt_agl = 0
-  local ok12, agl_d = pcall(LoGetAltitudeAboveGroundLevel)
-  if ok12 then alt_agl = safe_number(agl_d) end
+  local ok12, agl = pcall(LoGetAltitudeAboveGroundLevel)
+  if ok12 then alt_agl = safe_number(agl) end
 
-  -- ---- Aircraft type ----
-  local aircraft_type = self_data.Name or "unknown"
+  -- Player coalition (0=neutral, 1=red, 2=blue)
+  local player_coalition = 2  -- assume blue
+  local ok_unit, player_unit = pcall(function()
+    return Unit.getByName(self_data.UnitName or "")
+  end)
+  if ok_unit and player_unit then
+    local ok_coal, coal = pcall(function() return player_unit:getCoalition() end)
+    if ok_coal then player_coalition = coal end
+  end
 
-  -- ---- Build payload ----
-  local payload = {
+  local self_payload = {
+    msg_type       = "self",
     timestamp      = t,
-    aircraft       = aircraft_type,
+    aircraft       = self_data.Name or "unknown",
     lat            = lat,
     lon            = lon,
     alt_msl_m      = alt,
@@ -169,17 +169,76 @@ function LuaExportActivityNextEvent(t)
     fuel_kg        = fuel_internal,
     rpm_1          = throttle_1,
     rpm_2          = throttle_2,
+    coalition      = player_coalition,
   }
 
-  local json_str = json_encode(payload)
+  pcall(function() IOX.socket:send(json_encode(self_payload)) end)
 
-  local ok_send, err = pcall(function()
-    IOX.socket:send(json_str)
-  end)
+  -- ================================================================
+  -- 2. CONTACTS — world objects within radar range
+  -- ================================================================
+  local ok_w, world_objects = pcall(LoGetWorldObjects)
+  if not ok_w or not world_objects then return tNext end
 
-  if not ok_send then
-    log.write("IOX", log.WARNING, "[dcs-iox-api] Send error: " .. tostring(err))
+  local contacts = {}
+  for id, obj in pairs(world_objects) do
+    -- Skip player's own unit
+    if obj.UnitName ~= self_data.UnitName then
+
+      local c_lat, c_lon, c_alt = 0, 0, 0
+      if obj.LatLongAlt then
+        c_lat = safe_number(obj.LatLongAlt.Lat)
+        c_lon = safe_number(obj.LatLongAlt.Long)
+        c_alt = safe_number(obj.LatLongAlt.Alt)
+      end
+
+      -- Range check
+      local dist = haversine(lat, lon, c_lat, c_lon)
+      if dist <= IOX.radar_range_m then
+
+        local c_hdg   = 0
+        local c_speed = 0
+        if obj.Heading then
+          c_hdg = math.deg(safe_number(obj.Heading))
+          if c_hdg < 0 then c_hdg = c_hdg + 360 end
+        end
+        if obj.Velocity then
+          local cvx = safe_number(obj.Velocity.x)
+          local cvy = safe_number(obj.Velocity.y)
+          local cvz = safe_number(obj.Velocity.z)
+          c_speed = math.sqrt(cvx*cvx + cvy*cvy + cvz*cvz)
+        end
+
+        -- Coalition: 1=red, 2=blue, 0=neutral
+        local c_coal = safe_number(obj.CoalitionID or obj.coalition or 0)
+
+        table.insert(contacts, {
+          id         = tostring(id),
+          name       = obj.UnitName  or "",
+          type       = obj.Name      or "unknown",
+          lat        = c_lat,
+          lon        = c_lon,
+          alt_msl_m  = c_alt,
+          heading_deg= c_hdg,
+          speed_ms   = c_speed,
+          coalition  = c_coal,
+          dist_m     = dist,
+        })
+      end
+    end
   end
+
+  -- Send contacts packet
+  local contacts_payload = json_encode({
+    msg_type  = "contacts",
+    timestamp = t,
+    count     = #contacts,
+  })
+  -- Append contacts array manually (our encoder only does flat tables)
+  contacts_payload = contacts_payload:sub(1, -2)
+    .. ',"contacts":' .. json_encode_array(contacts) .. "}"
+
+  pcall(function() IOX.socket:send(contacts_payload) end)
 
   return tNext
 end
