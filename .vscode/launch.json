@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "compounds": [
+    {
+      "name": "DCS IOX: Full Stack Test",
+      "configurations": ["UDP Server", "Mock DCS"],
+      "stopAll": true
+    }
+  ],
+  "configurations": [
+    {
+      "name": "UDP Server",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "server.main",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "Mock DCS",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/tests/mock_dcs.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "preLaunchTask": "wait-for-server"
+    }
+  ]
+}
