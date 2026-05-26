@@ -1,0 +1,17 @@
+### Health check
+GET http://localhost:8000/health
+
+###
+
+### Full aircraft state
+GET http://localhost:8000/state
+
+###
+
+### Concise telemetry (position + speed + attitude)
+GET http://localhost:8000/telemetry
+
+###
+
+### Swagger UI (abrir no browser)
+# http://localhost:8000/docs

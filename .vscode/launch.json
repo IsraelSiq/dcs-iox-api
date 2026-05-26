@@ -3,13 +3,13 @@
   "compounds": [
     {
       "name": "DCS IOX: Full Stack Test",
-      "configurations": ["UDP Server", "Mock DCS"],
+      "configurations": ["IOX Server", "Mock DCS"],
       "stopAll": true
     }
   ],
   "configurations": [
     {
-      "name": "UDP Server",
+      "name": "IOX Server",
       "type": "debugpy",
       "request": "launch",
       "module": "server.main",
