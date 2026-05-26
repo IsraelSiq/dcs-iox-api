@@ -1,19 +1,18 @@
 # server/main.py
-# Issue #2 - UDP Listener Server
-# Runs the UDP socket + FastAPI in the same process via asyncio
 import asyncio
 import json
 import logging
+import os
 import signal
 import uvicorn
 
 from server.models import AircraftState
 from server import state as shared
 
-UDP_HOST = "127.0.0.1"
-UDP_PORT = 7778
-API_HOST = "127.0.0.1"
-API_PORT = 8000
+UDP_HOST = os.getenv("UDP_HOST", "127.0.0.1")
+UDP_PORT = int(os.getenv("UDP_PORT", "7778"))
+API_HOST = os.getenv("API_HOST", "127.0.0.1")
+API_PORT = int(os.getenv("API_PORT", "8000"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,9 +22,6 @@ logging.basicConfig(
 log = logging.getLogger("iox-server")
 
 
-# ----------------------------------------------------------------
-# UDP Protocol
-# ----------------------------------------------------------------
 class DCSUDPProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport):
         self.transport = transport
@@ -36,7 +32,6 @@ class DCSUDPProtocol(asyncio.DatagramProtocol):
             raw = json.loads(data.decode("utf-8"))
             shared.latest_state = AircraftState(**raw)
             shared.packet_count += 1
-
             if shared.packet_count % 30 == 0:
                 s = shared.latest_state
                 log.info(
@@ -53,9 +48,6 @@ class DCSUDPProtocol(asyncio.DatagramProtocol):
         log.error(f"UDP error: {exc}")
 
 
-# ----------------------------------------------------------------
-# Main: UDP + FastAPI side by side
-# ----------------------------------------------------------------
 async def main():
     loop = asyncio.get_running_loop()
 
@@ -67,26 +59,21 @@ async def main():
     log.info(f" WS   -> ws://{API_HOST}:{API_PORT}/ws/telemetry")
     log.info("=" * 55)
 
-    # Start UDP listener
     transport, _ = await loop.create_datagram_endpoint(
         DCSUDPProtocol,
         local_addr=(UDP_HOST, UDP_PORT),
     )
 
-    # Start FastAPI with uvicorn
     config = uvicorn.Config(
         "server.api:app",
         host=API_HOST,
         port=API_PORT,
-        log_level="warning",  # reduce noise, UDP logs already handle this
+        log_level="warning",
     )
     server = uvicorn.Server(config)
 
-    stop_event = asyncio.Event()
-
     def _shutdown():
         log.info("Shutting down...")
-        stop_event.set()
         server.should_exit = True
 
     loop.add_signal_handler(signal.SIGINT, _shutdown)

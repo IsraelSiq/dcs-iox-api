@@ -1,0 +1,19 @@
+services:
+  dcs-iox-api:
+    build: .
+    container_name: dcs-iox-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"        # REST + WebSocket
+      - "7778:7778/udp"    # DCS Export.lua UDP stream
+    environment:
+      UDP_HOST: "0.0.0.0"
+      UDP_PORT: "7778"
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
