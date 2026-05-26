@@ -1,9 +1,12 @@
 # server/state.py
-# Shared in-memory state between UDP listener and REST/WS API
 import time
+from collections import deque
 from server.models import AircraftState
-from typing import Optional
 
-latest_state: Optional[AircraftState] = None
-packet_count: int = 0
+# Shared state
+latest_state: AircraftState | None = None
 start_time: float = time.time()
+packet_count: int = 0
+
+# Ring buffer: keeps the last 200 log entries
+log_buffer: deque[dict] = deque(maxlen=200)
