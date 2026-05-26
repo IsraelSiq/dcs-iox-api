@@ -72,12 +72,14 @@ async def main():
     )
     server = uvicorn.Server(config)
 
-    def _shutdown():
+    # signal.signal() funciona em Windows e Unix
+    # loop.add_signal_handler() e exclusivo Unix — nao usar no Windows
+    def _shutdown(signum, frame):
         log.info("Shutting down...")
         server.should_exit = True
 
-    loop.add_signal_handler(signal.SIGINT, _shutdown)
-    loop.add_signal_handler(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
 
     try:
         await server.serve()
