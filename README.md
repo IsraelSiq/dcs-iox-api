@@ -2,20 +2,34 @@
 
 > Bridge between **DCS World** and the outside world via UDP → REST / WebSocket.
 
+## Arquitetura
+
+O DCS World possui **dois ambientes Lua separados** com APIs diferentes:
+
+| Ambiente | Arquivo | APIs disponíveis |
+|---|---|---|
+| Export environment | `Export.lua` (Saved Games) | `LoGetSelfData`, `LoGetIndicatedAirSpeed`, etc. |
+| Mission environment | `MissionScript.lua` (trigger na missão) | `world.searchObjects`, `Unit`, `coalition`, `coord`, etc. |
+
+`world.searchObjects` **não funciona** no Export environment — por isso contacts e telemetria são enviados em portas UDP separadas:
+
 ```
  DCS World
-  Export.lua
-      │
-      │  UDP :7778  (JSON frames ~30Hz)
-      ▼
- ┌────────────┐
- │ UDP Server │  asyncio DatagramProtocol
- └─────┬──────┘
-       │  shared in-memory state
- ┌─────▼──────┐
- │  FastAPI   │  REST + WebSocket
- └────────────┘
-   :8000
+  ├── Export.lua  (Saved Games\DCS\Scripts)
+  │     └─ player telemetry  ──► UDP :7778  (~30 Hz, JSON)
+  │
+  └── MissionScript.lua  (carregado via trigger DO SCRIPT FILE)
+        └─ contacts         ──► UDP :7779  (~1 Hz, JSON)
+
+                    ┌────────────────────┐
+                    │  UDP Server x2     │  asyncio
+                    │  7778 + 7779       │
+                    └────────┬───────────┘
+                             │  shared in-memory state
+                    ┌────────▼───────────┐
+                    │     FastAPI        │  REST + WebSocket
+                    └────────────────────┘
+                           :8000
 ```
 
 ---
@@ -48,29 +62,37 @@ Abra http://localhost:8000/docs para o Swagger UI.
 docker compose up --build
 ```
 
-Ou só o container:
-```bash
-docker build -t dcs-iox-api .
-docker run --rm -p 8000:8000 -p 7778:7778/udp dcs-iox-api
-```
-
 ---
 
-## Instalação do Export.lua no DCS
+## Instalação — Export.lua (telemetria do jogador)
 
 1. Copie `dcs/Export.lua` para:
    ```
    %USERPROFILE%\Saved Games\DCS\Scripts\Export.lua
    ```
-   > Se já existir um `Export.lua`, adicione o conteúdo ao final do arquivo existente.
+   > Se já existir um `Export.lua` (Tacview, SRS, etc.), **não substitua** — adicione o conteúdo ao final do arquivo existente.
 
-2. Inicie o servidor antes de entrar em missão:
-   ```bash
-   python -m server.main
-   # ou: docker compose up
-   ```
+2. Inicie o servidor Python antes de entrar em missão.
 
-3. Entre em qualquer missão no DCS. Em ~1s os dados começam a chegar.
+---
+
+## Instalação — MissionScript.lua (contacts)
+
+Este script precisa ser carregado **dentro de cada missão** que você queira usar:
+
+1. Abra a missão no **Mission Editor** do DCS.
+
+2. Vá em **Triggers** (ícone de engrenagem ou menu Mission → Triggers).
+
+3. Crie um novo trigger com:
+   - **Name**: `IOX_Start` (qualquer nome)
+   - **Type**: `ONCE`
+   - **Condition**: `TIME MORE (1)` — dispara 1 segundo após o início da missão
+   - **Action**: `DO SCRIPT FILE` → aponte para `dcs/MissionScript.lua`
+
+4. Salve a missão (`.miz`). O script é embarcado dentro do arquivo `.miz` — **não precisa** estar em nenhuma pasta específica na hora de jogar.
+
+> **Missões prontas (não editáveis):** não é possível injetar o MissionScript. Use apenas missões suas ou que você possa editar.
 
 ---
 
@@ -78,10 +100,12 @@ docker run --rm -p 8000:8000 -p 7778:7778/udp dcs-iox-api
 
 | Método | Path | Descrição |
 |--------|------|-----------|
-| `GET` | `/health` | Status do servidor, uptime, contagem de pacotes |
-| `GET` | `/state` | Estado completo da aeronave (todos os campos) |
+| `GET` | `/health` | Status, uptime, contagem de pacotes |
+| `GET` | `/state` | Estado completo da aeronave |
 | `GET` | `/telemetry` | Posição + velocidade + atitude (resumido) |
-| `WS` | `/ws/telemetry` | Stream em tempo real ~30Hz |
+| `GET` | `/contacts` | Lista de contatos detectados pelo MissionScript |
+| `WS` | `/ws/telemetry` | Stream telemetria ~30Hz |
+| `WS` | `/ws/contacts` | Stream contacts ~1Hz |
 | `GET` | `/docs` | Swagger UI |
 
 ### Exemplo `/telemetry`
@@ -90,36 +114,35 @@ docker run --rm -p 8000:8000 -p 7778:7778/udp dcs-iox-api
 {
   "aircraft": "F-16C_50",
   "timestamp": 123.45,
-  "position": {
-    "lat": 41.123,
-    "lon": 29.456,
-    "alt_msl_m": 4572.0,
-    "alt_agl_m": 4450.0
-  },
-  "speed": {
-    "ias_ms": 180.5,
-    "ias_kts": 350.9,
-    "tas_ms": 195.2,
-    "mach": 0.62,
-    "vvi_ms": 2.1
-  },
-  "attitude": {
-    "heading_deg": 270.0,
-    "pitch_deg": 3.5,
-    "bank_deg": -1.2,
-    "aoa_deg": 4.1
-  }
+  "position": { "lat": 41.123, "lon": 29.456, "alt_msl_m": 4572.0 },
+  "speed": { "ias_ms": 180.5, "ias_kts": 350.9, "mach": 0.62 },
+  "attitude": { "heading_deg": 270.0, "pitch_deg": 3.5, "bank_deg": -1.2 }
 }
 ```
 
-### WebSocket (JavaScript)
+### Exemplo `/contacts`
 
-```javascript
-const ws = new WebSocket('ws://localhost:8000/ws/telemetry');
-ws.onmessage = (e) => {
-  const state = JSON.parse(e.data);
-  console.log(state.aircraft, state.heading_deg);
-};
+```json
+{
+  "timestamp": 145.0,
+  "count": 3,
+  "contacts": [
+    {
+      "id": "MiG-29 #001",
+      "name": "MiG-29 #001",
+      "type": "MiG-29A",
+      "category": "unit",
+      "lat": 41.200,
+      "lon": 29.800,
+      "alt_msl_m": 6000.0,
+      "heading_deg": 180.0,
+      "speed_ms": 250.0,
+      "speed_kts": 486.0,
+      "coalition": 1,
+      "dist_m": 42000.0
+    }
+  ]
+}
 ```
 
 ---
@@ -129,18 +152,17 @@ ws.onmessage = (e) => {
 ```
 dcs-iox-api/
 ├── dcs/
-│   └── Export.lua          # Script Lua para DCS World
+│   ├── Export.lua          # Telemetria do jogador (Saved Games)
+│   └── MissionScript.lua   # Contacts (carregado via trigger na missão)
 ├── server/
 │   ├── __init__.py
-│   ├── main.py             # Entry point: UDP + FastAPI
+│   ├── main.py             # Entry point: UDP 7778 + 7779 + FastAPI
 │   ├── api.py              # FastAPI app, REST + WS
-│   ├── models.py           # Pydantic AircraftState
+│   ├── models.py           # Pydantic models
 │   └── state.py            # Shared in-memory state
 ├── tests/
 │   ├── mock_dcs.py         # Simulador UDP (sem DCS real)
-│   └── test_api.http       # REST Client snippets
-├── .vscode/
-│   └── launch.json
+│   └── test_api.http
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -153,12 +175,11 @@ dcs-iox-api/
 
 | Variável | Default | Descrição |
 |----------|---------|----------|
-| `UDP_HOST` | `127.0.0.1` | Interface UDP (use `0.0.0.0` para rede local) |
-| `UDP_PORT` | `7778` | Porta UDP que o Export.lua envia |
+| `UDP_HOST` | `127.0.0.1` | Interface UDP |
+| `UDP_PORT_TELEMETRY` | `7778` | Porta telemetria (Export.lua) |
+| `UDP_PORT_CONTACTS` | `7779` | Porta contacts (MissionScript.lua) |
 | `API_HOST` | `0.0.0.0` | Interface HTTP/WS |
 | `API_PORT` | `8000` | Porta HTTP/WS |
-
-> No Docker as variáveis já estão configuradas como `0.0.0.0` para aceitar conexões externas.
 
 ---
 
@@ -168,5 +189,5 @@ dcs-iox-api/
 # Testar sem DCS: simula frames a 30Hz
 python tests/mock_dcs.py
 
-# VSCode: F5 → "DCS IOX: Full Stack Test" (sobe server + mock juntos)
+# VSCode: F5 → "DCS IOX: Full Stack Test"
 ```
