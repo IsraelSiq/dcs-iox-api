@@ -242,39 +242,24 @@ end
 
 -- ----------------------------------------------------------------
 -- Contacts via world.searchObjects com callback (DCS 2.9+)
--- + DEBUG logs para diagnosticar LLtoLO e searchObjects
+-- Usa Unit:getPoint() diretamente como centro do volume —
+-- evita coord.LLtoLO que retorna userdata incompatível com
+-- a checagem type() == "table".
 -- ----------------------------------------------------------------
 local function get_contacts(player_lat, player_lon, player_alt, player_unit_name)
   local contacts = {}
 
-  -- DEBUG: confirma que get_contacts está sendo chamado com valores válidos
-  log.write("IOX", log.INFO, string.format(
-    "[IOX] get_contacts chamado: lat=%.4f lon=%.4f alt=%.1f unit=%s",
-    player_lat, player_lon, player_alt, tostring(player_unit_name)))
-
-  -- Tenta assinatura nova (tabela) primeiro, depois posicional
-  local ok_center, center_lo
-
-  ok_center, center_lo = pcall(coord.LLtoLO, {
-    lat = player_lat,
-    lon = player_lon,
-    alt = player_alt,
-  })
-
-  log.write("IOX", log.INFO, string.format(
-    "[IOX] LLtoLO (tabela) ok=%s center_lo=%s",
-    tostring(ok_center), tostring(center_lo)))
-
-  if not ok_center or not center_lo or type(center_lo) ~= "table" then
-    -- Fallback: assinatura posicional (DCS mais antigo)
-    ok_center, center_lo = pcall(coord.LLtoLO, player_lat, player_lon, player_alt)
-    log.write("IOX", log.INFO, string.format(
-      "[IOX] LLtoLO (posicional) ok=%s center_lo=%s",
-      tostring(ok_center), tostring(center_lo)))
+  -- Pega o ponto 3D nativo do DCS direto da unidade do jogador
+  local ok_unit, player_unit = pcall(Unit.getByName, player_unit_name)
+  if not ok_unit or not player_unit then
+    log.write("IOX", log.WARNING, string.format(
+      "[IOX] get_contacts: Unit.getByName falhou para '%s'", tostring(player_unit_name)))
+    return contacts
   end
 
-  if not ok_center or not center_lo then
-    log.write("IOX", log.WARNING, "[IOX] LLtoLO falhou nas duas assinaturas — abortando contacts")
+  local ok_pt, center_lo = pcall(function() return player_unit:getPoint() end)
+  if not ok_pt or not center_lo then
+    log.write("IOX", log.WARNING, "[IOX] get_contacts: getPoint() falhou")
     return contacts
   end
 
@@ -285,11 +270,6 @@ local function get_contacts(player_lat, player_lon, player_alt, player_unit_name
       radius = IOX.radar_range_m,
     },
   }
-
-  log.write("IOX", log.INFO, string.format(
-    "[IOX] volume criado: radius=%.0f point.x=%.1f point.y=%.1f point.z=%.1f",
-    IOX.radar_range_m,
-    safe_num(center_lo.x), safe_num(center_lo.y), safe_num(center_lo.z)))
 
   local categories = { Object.Category.UNIT, Object.Category.STATIC }
 
@@ -349,10 +329,9 @@ local function get_contacts(player_lat, player_lon, player_alt, player_unit_name
       end)
     end)
 
-    local count_after = #contacts
     log.write("IOX", log.INFO, string.format(
       "[IOX] searchObjects cat=%d ok=%s encontrados=%d err=%s",
-      cat, tostring(ok_search), count_after - count_before, tostring(err)))
+      cat, tostring(ok_search), #contacts - count_before, tostring(err)))
   end
 
   log.write("IOX", log.INFO, string.format(
