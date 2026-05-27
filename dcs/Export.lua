@@ -242,21 +242,39 @@ end
 
 -- ----------------------------------------------------------------
 -- Contacts via world.searchObjects com callback (DCS 2.9+)
---
--- FIXES aplicados:
---   1. Removido pcall() em torno de world.searchObjects — o pcall engolia
---      erros internos e impedia o callback de executar, resultando em 0 contacts.
---      O bloco inteiro agora fica dentro de um único pcall externo seguro.
---   2. coord.LLtoLO agora recebe altitude (3° argumento) para que o centro
---      da esfera de busca fique na altitude correta do jogador, e não no chão.
+-- + DEBUG logs para diagnosticar LLtoLO e searchObjects
 -- ----------------------------------------------------------------
 local function get_contacts(player_lat, player_lon, player_alt, player_unit_name)
   local contacts = {}
 
-  -- FIX 2: passa altitude para posicionar a esfera corretamente
-  local ok_center, center_lo = pcall(coord.LLtoLO, player_lat, player_lon, player_alt)
+  -- DEBUG: confirma que get_contacts está sendo chamado com valores válidos
+  log.write("IOX", log.INFO, string.format(
+    "[IOX] get_contacts chamado: lat=%.4f lon=%.4f alt=%.1f unit=%s",
+    player_lat, player_lon, player_alt, tostring(player_unit_name)))
+
+  -- Tenta assinatura nova (tabela) primeiro, depois posicional
+  local ok_center, center_lo
+
+  ok_center, center_lo = pcall(coord.LLtoLO, {
+    lat = player_lat,
+    lon = player_lon,
+    alt = player_alt,
+  })
+
+  log.write("IOX", log.INFO, string.format(
+    "[IOX] LLtoLO (tabela) ok=%s center_lo=%s",
+    tostring(ok_center), tostring(center_lo)))
+
+  if not ok_center or not center_lo or type(center_lo) ~= "table" then
+    -- Fallback: assinatura posicional (DCS mais antigo)
+    ok_center, center_lo = pcall(coord.LLtoLO, player_lat, player_lon, player_alt)
+    log.write("IOX", log.INFO, string.format(
+      "[IOX] LLtoLO (posicional) ok=%s center_lo=%s",
+      tostring(ok_center), tostring(center_lo)))
+  end
+
   if not ok_center or not center_lo then
-    log.write("IOX", log.WARNING, "[dcs-iox-api] LLtoLO falhou para posição do jogador")
+    log.write("IOX", log.WARNING, "[IOX] LLtoLO falhou nas duas assinaturas — abortando contacts")
     return contacts
   end
 
@@ -268,10 +286,16 @@ local function get_contacts(player_lat, player_lon, player_alt, player_unit_name
     },
   }
 
+  log.write("IOX", log.INFO, string.format(
+    "[IOX] volume criado: radius=%.0f point.x=%.1f point.y=%.1f point.z=%.1f",
+    IOX.radar_range_m,
+    safe_num(center_lo.x), safe_num(center_lo.y), safe_num(center_lo.z)))
+
   local categories = { Object.Category.UNIT, Object.Category.STATIC }
 
   for _, cat in ipairs(categories) do
-    -- FIX 1: sem pcall no searchObjects — usa proteção externa no tick
+    local count_before = #contacts
+
     local ok_search, err = pcall(function()
       world.searchObjects(cat, volume, function(obj)
         local ok_name, obj_name = pcall(function() return obj:getName() end)
@@ -325,11 +349,14 @@ local function get_contacts(player_lat, player_lon, player_alt, player_unit_name
       end)
     end)
 
-    if not ok_search then
-      log.write("IOX", log.WARNING,
-        "[dcs-iox-api] searchObjects erro (cat=" .. tostring(cat) .. "): " .. tostring(err))
-    end
+    local count_after = #contacts
+    log.write("IOX", log.INFO, string.format(
+      "[IOX] searchObjects cat=%d ok=%s encontrados=%d err=%s",
+      cat, tostring(ok_search), count_after - count_before, tostring(err)))
   end
+
+  log.write("IOX", log.INFO, string.format(
+    "[IOX] get_contacts total=%d", #contacts))
 
   return contacts
 end
@@ -353,7 +380,6 @@ local function iox_tick(t)
   IOX.socket:send(json_flat(self_payload))
 
   local unit_name = sd and safe_str(sd.UnitName) or ""
-  -- FIX 2: passa _alt para get_contacts
   local contacts  = get_contacts(_lat, _lon, _alt, unit_name)
 
   local hdr = json_flat({
