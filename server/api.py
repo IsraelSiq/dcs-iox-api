@@ -572,32 +572,25 @@ function draw(){
   const W=canvas.width,H=canvas.height,CX=W/2,CY=H/2,R=W/2-2;
   ctx.clearRect(0,0,W,H);
 
-  // Background
   const bgGrad=ctx.createRadialGradient(CX,CY,0,CX,CY,R);
   bgGrad.addColorStop(0,'#061406');bgGrad.addColorStop(1,'#020602');
   ctx.fillStyle=bgGrad;ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.fill();
 
-  // Grid rings
   ctx.strokeStyle='rgba(57,255,110,0.08)';ctx.lineWidth=1;
   for(let i=1;i<=4;i++){ctx.beginPath();ctx.arc(CX,CY,R*i/4,0,Math.PI*2);ctx.stroke();}
 
-  // Grid lines
   ctx.strokeStyle='rgba(57,255,110,0.05)';
   for(let a=0;a<360;a+=30){const rad=a*Math.PI/180;ctx.beginPath();ctx.moveTo(CX,CY);ctx.lineTo(CX+Math.sin(rad)*R,CY-Math.cos(rad)*R);ctx.stroke();}
 
-  // Range labels
   ctx.fillStyle='rgba(57,255,110,0.3)';ctx.font='9px Share Tech Mono';ctx.textAlign='center';
   for(let i=1;i<=4;i++){const km=Math.round(radarRange/1000*i/4);ctx.fillText(km+'km',CX,CY-R*i/4+3);}
 
-  // Cardinal labels
   ctx.fillStyle='rgba(57,255,110,0.5)';ctx.font='11px Orbitron';
   const dirs=['N','E','S','W'];const angles=[0,90,180,270];
   dirs.forEach((d,i)=>{const rad=angles[i]*Math.PI/180;const x=CX+Math.sin(rad)*(R-14);const y=CY-Math.cos(rad)*(R-14);ctx.textAlign='center';ctx.fillText(d,x,y+4);});
 
-  // Clip to circle
   ctx.save();ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.clip();
 
-  // Contacts
   if(selfData){
     contacts.forEach(c=>{
       const dist=haversine(selfData.lat,selfData.lon,c.lat,c.lon);
@@ -609,16 +602,13 @@ function draw(){
       const color=iffColor(c.coalition);
       const isSelected=c.id===selectedId;
 
-      // Glow
       const glow=ctx.createRadialGradient(cx2,cy2,0,cx2,cy2,isSelected?16:10);
       glow.addColorStop(0,color.replace(')',',0.3)').replace('rgb','rgba'));
       glow.addColorStop(1,'transparent');
       ctx.fillStyle=glow;ctx.beginPath();ctx.arc(cx2,cy2,isSelected?16:10,0,Math.PI*2);ctx.fill();
 
-      // Dot
       ctx.fillStyle=color;ctx.beginPath();ctx.arc(cx2,cy2,isSelected?5:3,0,Math.PI*2);ctx.fill();
 
-      // Heading line
       if(c.speed_ms>2){
         const hrad=c.heading_deg*Math.PI/180;
         ctx.strokeStyle=color;ctx.lineWidth=1;ctx.globalAlpha=0.6;
@@ -626,15 +616,15 @@ function draw(){
         ctx.globalAlpha=1;
       }
 
-      // Label
-      ctx.fillStyle=isSelected?'#ffffff':color;ctx.font=(isSelected?'bold ':')+'10px Share Tech Mono';ctx.textAlign='left';
+      ctx.fillStyle=isSelected?'#ffffff':color;
+      ctx.font=(isSelected?'bold ':'')+'10px Share Tech Mono';
+      ctx.textAlign='left';
       ctx.fillText(c.name||c.id,cx2+7,cy2-4);
       const altFt=Math.round((c.alt_msl_m||0)*3.28084/100)*100;
       ctx.fillStyle='rgba(160,208,160,0.5)';ctx.font='9px Share Tech Mono';
       ctx.fillText(altFt+'ft',cx2+7,cy2+8);
     });
 
-    // Own ship
     const hdgRad=(selfData.heading_deg||0)*Math.PI/180;
     ctx.save();ctx.translate(CX,CY);ctx.rotate(hdgRad);
     ctx.fillStyle='#40c8ff';ctx.strokeStyle='#40c8ff';ctx.lineWidth=1.5;
@@ -644,7 +634,6 @@ function draw(){
 
   ctx.restore();
 
-  // Border
   ctx.strokeStyle='rgba(57,255,110,0.2)';ctx.lineWidth=1.5;
   ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.stroke();
 }
