@@ -12,27 +12,24 @@ import os
 UDP_HOST = os.getenv("UDP_HOST", "127.0.0.1")
 UDP_PORT = int(os.getenv("UDP_PORT", "7778"))
 
-# Jogador base
 PLAYER_LAT = 41.0
 PLAYER_LON = 29.0
 
-# Definição dos contacts:
 # (id, aircraft_type, coalition, offset_lat_km, offset_lon_km, alt_m, speed_ms, heading_deg, orbit_radius_km, orbit_speed_deg_s)
 CONTACTS_DEF = [
     # --- ALIADOS (blue) ---
-    ("HAWK-1",  "F-16C_50",   "blue",   20,   15,  5000, 210, 045, 8,  4.0),
-    ("HAWK-2",  "F-16C_50",   "blue",   22,   17,  5200, 205, 050, 8,  4.0),
-    ("AWACS-1", "E-3A",       "blue",   40,   -5, 10000, 160, 270, 15, 1.5),
+    ("HAWK-1",  "F-16C_50",  "blue",    20,   15,  5000, 210, 45,  8,  4.0),
+    ("HAWK-2",  "F-16C_50",  "blue",    22,   17,  5200, 205, 50,  8,  4.0),
+    ("AWACS-1", "E-3A",      "blue",    40,   -5, 10000, 160, 270, 15, 1.5),
     # --- INIMIGOS (red) ---
-    ("RED-1",   "MiG-29S",    "red",   -25,   30,  7500, 280, 190, 12, 3.0),
-    ("RED-2",   "MiG-29S",    "red",   -28,   35,  8000, 275, 200, 12, 3.0),
-    ("SU-27-1", "Su-27",      "red",   -60,   20, 12000, 320, 160,  5, 2.0),
+    ("RED-1",   "MiG-29S",   "red",    -25,   30,  7500, 280, 190, 12, 3.0),
+    ("RED-2",   "MiG-29S",   "red",    -28,   35,  8000, 275, 200, 12, 3.0),
+    ("SU-27-1", "Su-27",     "red",    -60,   20, 12000, 320, 160,  5, 2.0),
     # --- NEUTROS / desconhecidos ---
-    ("CIV-1",   "IL-76MD",    "neutral", 50,  50,  9000, 230, 095, 30, 0.8),
-    ("UNK-1",   "Unknown",    "neutral",-15,  -20,  4000, 190, 310, 10, 2.5),
+    ("CIV-1",   "IL-76MD",   "neutral", 50,   50,  9000, 230, 95,  30, 0.8),
+    ("UNK-1",   "Unknown",   "neutral",-15,  -20,  4000, 190, 310, 10, 2.5),
 ]
 
-# Converte km offset para graus aproximados (1 grau lat ≈ 111 km)
 KM_PER_DEG_LAT = 111.0
 
 def km_to_deg_lat(km):
@@ -43,7 +40,6 @@ def km_to_deg_lon(km, lat):
 
 
 def build_frame(t: float) -> dict:
-    """Gera estado simulado do jogador (F-16 em voo circular)."""
     heading = (t * 5) % 360
     rad = math.radians(heading)
     return {
@@ -73,10 +69,8 @@ def build_frame(t: float) -> dict:
 
 
 def build_contacts(t: float) -> list:
-    """Gera lista de contacts animados com movimento independente."""
     contacts = []
     for (cid, atype, coalition, dlat_km, dlon_km, alt_m, spd_ms, hdg_base, orb_r_km, orb_spd) in CONTACTS_DEF:
-        # Cada contact orbita em volta de seu ponto base
         orbit_angle = math.radians((t * orb_spd + hdg_base) % 360)
         base_lat = PLAYER_LAT + km_to_deg_lat(dlat_km)
         base_lon = PLAYER_LON + km_to_deg_lon(dlon_km, PLAYER_LAT)
@@ -84,13 +78,8 @@ def build_contacts(t: float) -> list:
         lat = base_lat + km_to_deg_lat(math.sin(orbit_angle) * orb_r_km)
         lon = base_lon + km_to_deg_lon(math.cos(orbit_angle) * orb_r_km, base_lat)
 
-        # Heading aponta na direção do movimento da órbita
         heading = (math.degrees(orbit_angle) + 90) % 360
-
-        # Altitude oscila levemente
         alt = alt_m + math.sin(t * 0.3 + hdg_base) * 200
-
-        # Velocidade varia levemente
         spd = spd_ms + math.sin(t * 0.2 + hdg_base * 0.1) * 15
 
         contacts.append({
