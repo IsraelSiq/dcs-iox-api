@@ -1,120 +1,180 @@
-# tests/mock_dcs.py
-# Simula o Export.lua enviando frames UDP a 30Hz
-# Inclui o jogador + 8 contacts com coalizões, altitudes, velocidades e rumos distintos
-# Uso: python tests/mock_dcs.py
-import asyncio
+"""tests/mock_dcs.py  v2
+
+Simula o DCS World enviando dados via UDP para o servidor local.
+  - Porta 7778 (30Hz) → telemetria do jogador  (Export.lua)
+  - Porta 7779  (2Hz) → contatos do radar      (MissionScript.lua)
+
+Uso:
+    python tests/mock_dcs.py
+
+Certifique-se de que o servidor está rodando:
+    python -m server.main
+"""
+
 import json
 import math
-import time
+import random
 import socket
-import os
+import time
 
-UDP_HOST = os.getenv("UDP_HOST", "127.0.0.1")
-UDP_PORT = int(os.getenv("UDP_PORT", "7778"))
+# ── Config ──────────────────────────────────────────────────────────────────
+HOST            = "127.0.0.1"
+PORT_TELEMETRY  = 7778
+PORT_CONTACTS   = 7779
+TELEM_HZ        = 30
+CONTACTS_HZ     = 2
 
-PLAYER_LAT = 41.0
-PLAYER_LON = 29.0
+# Posição do jogador (Caucasus — Batumi)
+PLAYER_LAT = 41.6102
+PLAYER_LON = 41.5985
 
-# (id, aircraft_type, coalition, offset_lat_km, offset_lon_km, alt_m, speed_ms, heading_deg, orbit_radius_km, orbit_speed_deg_s)
-CONTACTS_DEF = [
-    # --- ALIADOS (blue) ---
-    ("HAWK-1",  "F-16C_50",  "blue",    20,   15,  5000, 210, 45,  8,  4.0),
-    ("HAWK-2",  "F-16C_50",  "blue",    22,   17,  5200, 205, 50,  8,  4.0),
-    ("AWACS-1", "E-3A",      "blue",    40,   -5, 10000, 160, 270, 15, 1.5),
-    # --- INIMIGOS (red) ---
-    ("RED-1",   "MiG-29S",   "red",    -25,   30,  7500, 280, 190, 12, 3.0),
-    ("RED-2",   "MiG-29S",   "red",    -28,   35,  8000, 275, 200, 12, 3.0),
-    ("SU-27-1", "Su-27",     "red",    -60,   20, 12000, 320, 160,  5, 2.0),
-    # --- NEUTROS / desconhecidos ---
-    ("CIV-1",   "IL-76MD",   "neutral", 50,   50,  9000, 230, 95,  30, 0.8),
-    ("UNK-1",   "Unknown",   "neutral",-15,  -20,  4000, 190, 310, 10, 2.5),
+
+# ── Helpers de geográfia ──────────────────────────────────────────────────────
+def offset_ll(lat, lon, bearing_deg, dist_m):
+    R = 6_371_000.0
+    b = math.radians(bearing_deg)
+    la1, lo1 = math.radians(lat), math.radians(lon)
+    la2 = math.asin(math.sin(la1) * math.cos(dist_m / R) +
+                    math.cos(la1) * math.sin(dist_m / R) * math.cos(b))
+    lo2 = lo1 + math.atan2(math.sin(b) * math.sin(dist_m / R) * math.cos(la1),
+                           math.cos(dist_m / R) - math.sin(la1) * math.sin(la2))
+    return math.degrees(la2), math.degrees(lo2)
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6_371_000.0
+    dl = math.radians(lat2 - lat1)
+    dL = math.radians(lon2 - lon1)
+    a = math.sin(dl/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dL/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+# ── Contatos pré-definidos ──────────────────────────────────────────────────────
+# coalition: 0=Neutral  1=Friendly  2=Enemy
+CONTACT_DEFS = [
+    dict(id="c1", name="Enfield-1",  type="Su-27",   category="Air",    coalition=1, bearing=0,   dist_km=40,  alt_m=8000,  hdg=180, spd_ms=220, source="search"),
+    dict(id="c2", name="Colt-2",     type="F-15C",   category="Air",    coalition=1, bearing=45,  dist_km=25,  alt_m=6000,  hdg=225, spd_ms=260, source="search"),
+    dict(id="c3", name="Hostile-1",  type="MiG-29",  category="Air",    coalition=2, bearing=5,   dist_km=60,  alt_m=9000,  hdg=185, spd_ms=280, source="search"),
+    dict(id="c4", name="Hostile-2",  type="Su-25",   category="Air",    coalition=2, bearing=90,  dist_km=80,  alt_m=1500,  hdg=270, spd_ms=180, source="search"),
+    dict(id="c5", name="Cargo-01",   type="An-26",   category="Air",    coalition=0, bearing=180, dist_km=110, alt_m=4000,  hdg=0,   spd_ms=110, source="search"),
+    dict(id="c6", name="TANK-01",    type="T-72",    category="Ground",  coalition=2, bearing=270, dist_km=15,  alt_m=50,    hdg=90,  spd_ms=8,   source="search"),
+    dict(id="c7", name="Magic-1",    type="E-3A",    category="Air",    coalition=1, bearing=315, dist_km=130, alt_m=11000, hdg=135, spd_ms=200, source="awacs"),
 ]
 
-KM_PER_DEG_LAT = 111.0
-
-def km_to_deg_lat(km):
-    return km / KM_PER_DEG_LAT
-
-def km_to_deg_lon(km, lat):
-    return km / (KM_PER_DEG_LAT * math.cos(math.radians(lat)))
+# Estado dinâmico — inicializa posições
+states = {}
+for cd in CONTACT_DEFS:
+    lat, lon = offset_ll(PLAYER_LAT, PLAYER_LON, cd["bearing"], cd["dist_km"] * 1000)
+    states[cd["id"]] = {**cd, "lat": lat, "lon": lon}
 
 
-def build_frame(t: float) -> dict:
-    heading = (t * 5) % 360
-    rad = math.radians(heading)
+def move_contacts(dt):
+    for c in states.values():
+        step = c["spd_ms"] * dt
+        c["lat"], c["lon"] = offset_ll(c["lat"], c["lon"], c["hdg"], step)
+        c["hdg"] = (c["hdg"] + random.uniform(-0.3, 0.3)) % 360
+
+
+def contacts_packet():
+    out = []
+    for c in states.values():
+        dist = haversine(PLAYER_LAT, PLAYER_LON, c["lat"], c["lon"])
+        spd  = c["spd_ms"] + random.uniform(-2, 2)
+        out.append({
+            "id":          c["id"],
+            "name":        c["name"],
+            "type":        c["type"],
+            "category":    c["category"],
+            "coalition":   c["coalition"],
+            "lat":         c["lat"],
+            "lon":         c["lon"],
+            "alt_msl_m":   c["alt_m"] + random.uniform(-30, 30),
+            "heading_deg": round(c["hdg"], 1),
+            "speed_ms":    round(spd, 1),
+            "speed_kts":   round(spd * 1.944, 1),
+            "dist_m":      round(dist, 0),
+            "source":      c["source"],
+        })
+    return {"type": "contacts", "ts": time.time(), "contacts": out}
+
+
+# ── Telemetria do jogador ─────────────────────────────────────────────────────
+player_hdg = 0.0
+
+def telemetry_packet(t):
+    global player_hdg
+    player_hdg = (player_hdg + 0.5) % 360
+    ias = 220 + math.sin(t * 0.1) * 20
+    alt = 6000 + math.sin(t * 0.05) * 300
     return {
-        "aircraft": "F-16C_50",
-        "timestamp": t,
-        "lat": PLAYER_LAT + math.sin(rad) * 0.05,
-        "lon": PLAYER_LON + math.cos(rad) * 0.05,
-        "alt_msl_m": 4572.0 + math.sin(t * 0.5) * 100,
-        "alt_agl_m": 4450.0 + math.sin(t * 0.5) * 100,
-        "ias_ms": 180.0 + math.sin(t * 0.3) * 10,
-        "tas_ms": 195.0 + math.sin(t * 0.3) * 10,
-        "mach": 0.62 + math.sin(t * 0.1) * 0.02,
-        "vvi_ms": math.cos(t * 0.5) * 2.0,
-        "heading_deg": heading,
-        "pitch_deg": math.sin(t * 0.5) * 3.0,
-        "bank_deg": math.sin(t * 0.3) * 15.0,
-        "aoa_deg": 4.0 + math.sin(t * 0.2) * 1.5,
-        "g_load": 1.0 + abs(math.sin(t * 0.3)) * 2.0,
-        "throttle": 0.75,
-        "rpm_pct": 85.0,
-        "fuel_kg": max(0.0, 3000.0 - t * 0.5),
-        "flaps_pct": 0.0,
-        "gear_down": False,
-        "airbrake_pct": 0.0,
-        "engine_fire": False,
+        "aircraft":        "F/A-18C",
+        "timestamp":       t,
+        "lat":             PLAYER_LAT,
+        "lon":             PLAYER_LON,
+        "alt_msl_m":       alt,
+        "alt_agl_m":       alt - 200,
+        "ias_ms":          ias,
+        "tas_ms":          ias * 1.05,
+        "mach":            ias / 340,
+        "vvi_ms":          math.sin(t * 0.3) * 3,
+        "heading_deg":     player_hdg,
+        "pitch_deg":       math.sin(t * 0.3) * 5,
+        "bank_deg":        math.sin(t * 0.2) * 15,
+        "aoa_deg":         2.5 + math.sin(t * 0.4) * 1.5,
+        "g_force":         1.0 + abs(math.sin(t * 0.2)) * 2,
+        "fuel_kg":         max(0, 3000 - t * 0.5),
+        "fuel_max_kg":     5000,
+        "engine_rpm_pct":  85 + math.sin(t * 0.1) * 5,
     }
 
 
-def build_contacts(t: float) -> list:
-    contacts = []
-    for (cid, atype, coalition, dlat_km, dlon_km, alt_m, spd_ms, hdg_base, orb_r_km, orb_spd) in CONTACTS_DEF:
-        orbit_angle = math.radians((t * orb_spd + hdg_base) % 360)
-        base_lat = PLAYER_LAT + km_to_deg_lat(dlat_km)
-        base_lon = PLAYER_LON + km_to_deg_lon(dlon_km, PLAYER_LAT)
-
-        lat = base_lat + km_to_deg_lat(math.sin(orbit_angle) * orb_r_km)
-        lon = base_lon + km_to_deg_lon(math.cos(orbit_angle) * orb_r_km, base_lat)
-
-        heading = (math.degrees(orbit_angle) + 90) % 360
-        alt = alt_m + math.sin(t * 0.3 + hdg_base) * 200
-        spd = spd_ms + math.sin(t * 0.2 + hdg_base * 0.1) * 15
-
-        contacts.append({
-            "id": cid,
-            "aircraft": atype,
-            "coalition": coalition,
-            "lat": lat,
-            "lon": lon,
-            "alt_msl_m": round(alt, 1),
-            "heading_deg": round(heading, 1),
-            "speed_ms": round(spd, 1),
-            "speed_kts": round(spd * 1.944, 1),
-        })
-    return contacts
-
-
-async def run():
+# ── Loop principal ─────────────────────────────────────────────────────────────
+def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    print(f"[mock_dcs] Sending to {UDP_HOST}:{UDP_PORT} at 30Hz")
-    print(f"[mock_dcs] Player: F-16C + {len(CONTACTS_DEF)} contacts (blue/red/neutral)")
-    print("[mock_dcs] Ctrl+C to stop.")
-    t = 0.0
+    telem_iv    = 1.0 / TELEM_HZ
+    contacts_iv = 1.0 / CONTACTS_HZ
+    last_telem  = last_contacts = last_move = time.time()
+    start = time.time()
+
+    print(f"[mock_dcs] telem   → {HOST}:{PORT_TELEMETRY}  @ {TELEM_HZ}Hz")
+    print(f"[mock_dcs] contacts → {HOST}:{PORT_CONTACTS}  @ {CONTACTS_HZ}Hz")
+    print(f"[mock_dcs] {len(states)} contatos  |  jogador: F/A-18C em Batumi")
+    print(f"[mock_dcs] Acesse: http://127.0.0.1:8000/radar")
+    print(f"[mock_dcs] Ctrl+C para parar.\n")
+    for c in states.values():
+        coal = ["Neutral","Friendly","Enemy"][c['coalition']]
+        print(f"  {c['id']}  {c['name']:<14} {c['type']:<8}  {coal:<10}  dist={c['dist_km']}km")
+    print()
+
     try:
         while True:
-            frame = build_frame(t)
-            frame["contacts"] = build_contacts(t)
-            payload = json.dumps(frame).encode("utf-8")
-            sock.sendto(payload, (UDP_HOST, UDP_PORT))
-            t += 1 / 30
-            await asyncio.sleep(1 / 30)
+            now = time.time()
+            t   = now - start
+
+            move_contacts(now - last_move)
+            last_move = now
+
+            if now - last_telem >= telem_iv:
+                sock.sendto(json.dumps(telemetry_packet(t)).encode(), (HOST, PORT_TELEMETRY))
+                last_telem = now
+
+            if now - last_contacts >= contacts_iv:
+                sock.sendto(json.dumps(contacts_packet()).encode(), (HOST, PORT_CONTACTS))
+                last_contacts = now
+                enemies = [c for c in states.values() if c["coalition"] == 2]
+                closest = min(enemies, key=lambda c: haversine(PLAYER_LAT, PLAYER_LON, c["lat"], c["lon"]), default=None)
+                if closest:
+                    dist_km = haversine(PLAYER_LAT, PLAYER_LON, closest["lat"], closest["lon"]) / 1000
+                    threat  = " ⚠ï¸ AMEAÇA" if dist_km < 20 else ""
+                    print(f"\r[t={t:6.1f}s] contatos={len(states)}  ameaça próxima: {closest['name']} {dist_km:.1f}km{threat}   ", end="", flush=True)
+
+            time.sleep(0.005)
+
     except KeyboardInterrupt:
-        print("[mock_dcs] Stopped.")
+        print("\n[mock_dcs] Encerrado.")
     finally:
         sock.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    main()
