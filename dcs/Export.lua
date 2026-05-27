@@ -1,27 +1,23 @@
 -- =============================================================
 -- dcs-iox-api | Export.lua  (DCS 2.9+)
--- Envia telemetria do jogador via UDP 7778 (~30 Hz)
--- Lê contacts do arquivo temporário escrito pelo MissionScript.lua
--- e os encaminha ao servidor Python via UDP 7779 (a cada 1s aprox.)
+-- Envia telemetria do jogador + contacts de todas as unidades
+-- via UDP 7778 (~30 Hz), usando LoGetWorldObjects() nativo.
 --
 -- INSTALAÇÃO:
 --   Copie para: %USERPROFILE%\Saved Games\DCS\Scripts\Export.lua
 --   Se já existir Export.lua (Tacview, SRS...), adicione ao final.
+--
+-- NÃO é necessário nenhum MissionScript.lua.
 -- =============================================================
 
 local IOX = {}
-IOX.host               = "127.0.0.1"
-IOX.port_telem         = 7778      -- telemetria do jogador
-IOX.port_contacts      = 7779      -- contacts -> servidor Python
-IOX.socket_telem       = nil
-IOX.socket_contacts    = nil
-IOX.update_interval    = 0.033     -- ~30 Hz
-IOX.contacts_interval  = 1.0      -- lê arquivo a cada 1s
-IOX.contacts_last_read = 0
-IOX.contacts_file      = lfs.writedir() .. "Scripts\\iox_contacts.json"
+IOX.host            = "127.0.0.1"
+IOX.port            = 7778
+IOX.socket          = nil
+IOX.update_interval = 0.033   -- ~30 Hz
 
 -- ----------------------------------------------------------------
--- Helpers
+-- Helpers JSON mínimos (sem dependências)
 -- ----------------------------------------------------------------
 local function safe_num(v)
   if type(v) == "number" and v == v then return v else return 0 end
@@ -33,7 +29,7 @@ end
 
 local function json_str(s)
   s = tostring(s or "")
-  s = s:gsub('\\','\\\\'):gsub('"','\\"'):gsub('\n','\\n'):gsub('\r','\\r')
+  s = s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r')
   return '"' .. s .. '"'
 end
 
@@ -53,20 +49,20 @@ local function json_flat(t)
 end
 
 -- ----------------------------------------------------------------
--- Carrega luasocket (disponível no Export environment)
+-- Carrega luasocket
 -- ----------------------------------------------------------------
 local function load_socket()
   local ok, sock = pcall(require, "socket")
   if ok and sock then return sock end
 
-  local dcs_paths = {
+  local paths = {
     "./Scripts/?.dll",
     "./bin/?.dll",
     "C:/Program Files/Eagle Dynamics/DCS World/bin/?.dll",
     "C:/Program Files/Eagle Dynamics/DCS World OpenBeta/bin/?.dll",
     "C:/Program Files (x86)/Steam/steamapps/common/DCSWorld/bin/?.dll",
   }
-  for _, p in ipairs(dcs_paths) do
+  for _, p in ipairs(paths) do
     package.cpath = package.cpath .. ";" .. p
   end
 
@@ -102,26 +98,23 @@ function LuaExportStart()
     return
   end
 
-  IOX.socket_telem    = make_udp(sock_lib, IOX.host, IOX.port_telem)
-  IOX.socket_contacts = make_udp(sock_lib, IOX.host, IOX.port_contacts)
+  IOX.socket = make_udp(sock_lib, IOX.host, IOX.port)
 
-  if IOX.socket_telem then
+  if IOX.socket then
     log.write("IOX", log.INFO,
-      "[dcs-iox-api] Export started -> telemetria:" .. IOX.port_telem ..
-      " contacts:" .. IOX.port_contacts)
+      "[dcs-iox-api] Export started -> " .. IOX.host .. ":" .. IOX.port)
   else
-    log.write("IOX", log.ERROR, "[dcs-iox-api] Falha ao criar sockets UDP")
+    log.write("IOX", log.ERROR, "[dcs-iox-api] Falha ao criar socket UDP")
   end
 end
 
 function LuaExportStop()
-  if IOX.socket_telem    then IOX.socket_telem:close();    IOX.socket_telem    = nil end
-  if IOX.socket_contacts then IOX.socket_contacts:close(); IOX.socket_contacts = nil end
+  if IOX.socket then IOX.socket:close(); IOX.socket = nil end
   log.write("IOX", log.INFO, "[dcs-iox-api] Export stopped")
 end
 
 -- ----------------------------------------------------------------
--- Player telemetry
+-- Telemetria do jogador
 -- ----------------------------------------------------------------
 local function get_self_data(t)
   local ok, sd = pcall(LoGetSelfData)
@@ -132,14 +125,6 @@ local function get_self_data(t)
     lat = safe_num(sd.LatLongAlt.Lat)
     lon = safe_num(sd.LatLongAlt.Long)
     alt = safe_num(sd.LatLongAlt.Alt)
-  end
-
-  local speed_ms = 0
-  if sd.Velocity then
-    local vx = safe_num(sd.Velocity.x)
-    local vy = safe_num(sd.Velocity.y)
-    local vz = safe_num(sd.Velocity.z)
-    speed_ms = math.sqrt(vx*vx + vy*vy + vz*vz)
   end
 
   local heading, pitch, bank = 0, 0, 0
@@ -155,11 +140,11 @@ local function get_self_data(t)
   end
 
   local ias_ms, tas_ms, mach, aoa_deg, vvi_ms = 0, 0, 0, 0, 0
-  local ok3, v = pcall(LoGetIndicatedAirSpeed);  if ok3 and v then ias_ms  = safe_num(v)            end
-  local ok4, v = pcall(LoGetTrueAirSpeed);       if ok4 and v then tas_ms  = safe_num(v)            end
-  local ok5, v = pcall(LoGetMachNumber);         if ok5 and v then mach    = safe_num(v)            end
-  local ok6, v = pcall(LoGetAngleOfAttack);      if ok6 and v then aoa_deg = math.deg(safe_num(v))  end
-  local ok7, v = pcall(LoGetVerticalVelocity);   if ok7 and v then vvi_ms  = safe_num(v)            end
+  local ok3, v = pcall(LoGetIndicatedAirSpeed); if ok3 and v then ias_ms  = safe_num(v)           end
+  local ok4, v = pcall(LoGetTrueAirSpeed);      if ok4 and v then tas_ms  = safe_num(v)           end
+  local ok5, v = pcall(LoGetMachNumber);        if ok5 and v then mach    = safe_num(v)           end
+  local ok6, v = pcall(LoGetAngleOfAttack);     if ok6 and v then aoa_deg = math.deg(safe_num(v)) end
+  local ok7, v = pcall(LoGetVerticalVelocity);  if ok7 and v then vvi_ms  = safe_num(v)           end
 
   local alt_agl = 0
   local ok8, v = pcall(LoGetAltitudeAboveGroundLevel)
@@ -193,7 +178,6 @@ local function get_self_data(t)
     lon         = lon,
     alt_msl_m   = alt,
     alt_agl_m   = alt_agl,
-    speed_ms    = speed_ms,
     ias_ms      = ias_ms,
     tas_ms      = tas_ms,
     mach        = mach,
@@ -211,43 +195,111 @@ local function get_self_data(t)
 end
 
 -- ----------------------------------------------------------------
--- Lê contacts do arquivo escrito pelo MissionScript.lua
--- Só lê a cada contacts_interval segundos para não sobrecarregar I/O
+-- Contacts — LoGetWorldObjects() retorna TODAS as unidades do mapa
+-- coalition: 1=Allies, 2=Enemies, 0=Neutral (ou string em versões antigas)
 -- ----------------------------------------------------------------
-local function read_contacts_from_file(t)
-  if (t - IOX.contacts_last_read) < IOX.contacts_interval then return end
-  IOX.contacts_last_read = t
+local COALITION_MAP = { Allies = 1, Enemies = 2, Neutral = 0 }
 
-  local f = io.open(IOX.contacts_file, "r")
-  if not f then return end  -- arquivo ainda não existe (MissionScript não iniciou)
+local function get_contacts(self_lat, self_lon)
+  local ok, objs = pcall(LoGetWorldObjects)
+  if not ok or not objs then return "[]" end
 
-  local content = f:read("*a")
-  f:close()
+  local parts = {}
+  local R = 6371000.0
 
-  if content and #content > 5 and IOX.socket_contacts then
-    -- Envelopa o payload com msg_type para o servidor Python identificar
-    local payload = string.format(
-      '{"msg_type":"contacts","timestamp":%.3f,"data":%s}', t, content)
-    IOX.socket_contacts:send(payload)
-    log.write("IOX", log.INFO,
-      string.format("[dcs-iox-api] contacts enviados via UDP (%d bytes)", #payload))
+  for id, obj in pairs(objs) do
+    if obj and obj.LatLongAlt then
+      local lat = safe_num(obj.LatLongAlt.Lat)
+      local lon = safe_num(obj.LatLongAlt.Long)
+      local alt = safe_num(obj.LatLongAlt.Alt)
+
+      -- heading
+      local hdg = 0
+      if obj.Heading then
+        hdg = math.deg(safe_num(obj.Heading))
+        if hdg < 0 then hdg = hdg + 360 end
+      end
+
+      -- velocidade
+      local spd_ms = 0
+      if obj.Velocity then
+        local vx = safe_num(obj.Velocity.x)
+        local vy = safe_num(obj.Velocity.y)
+        local vz = safe_num(obj.Velocity.z)
+        spd_ms = math.sqrt(vx*vx + vy*vy + vz*vz)
+      end
+
+      -- coalizão: número ou string dependendo da versão do DCS
+      local coal = obj.Coalition
+      if type(coal) == "string" then
+        coal = COALITION_MAP[coal] or 0
+      else
+        coal = safe_num(coal)
+      end
+
+      -- categoria
+      local cat = safe_str(obj.Type and obj.Type.level1 or "")
+      if cat == "" then
+        cat = (obj.Flags and obj.Flags.Ground) and "Ground" or "Air"
+      end
+
+      -- distância ao jogador (haversine simples)
+      local dist_m = 0
+      if self_lat ~= 0 or self_lon ~= 0 then
+        local dlat = math.rad(lat - self_lat)
+        local dlon = math.rad(lon - self_lon)
+        local a = math.sin(dlat/2)^2
+                + math.cos(math.rad(self_lat)) * math.cos(math.rad(lat))
+                * math.sin(dlon/2)^2
+        dist_m = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+      end
+
+      local entry = string.format(
+        '{"id":%s,"name":%s,"type":%s,"category":%s,' ..
+        '"coalition":%d,"lat":%.6f,"lon":%.6f,"alt_msl_m":%.1f,' ..
+        '"heading_deg":%.1f,"speed_ms":%.1f,"speed_kts":%.1f,"dist_m":%.0f,"source":"export"}',
+        json_str(tostring(id)),
+        json_str(safe_str(obj.Name)),
+        json_str(safe_str(obj.Type and obj.Type.level2 or obj.Name or "")),
+        json_str(cat),
+        coal, lat, lon, alt,
+        hdg, spd_ms, spd_ms * 1.94384, dist_m
+      )
+      table.insert(parts, entry)
+    end
   end
+
+  return "[" .. table.concat(parts, ",") .. "]"
 end
 
 -- ----------------------------------------------------------------
 -- Loop principal ~30 Hz
 -- ----------------------------------------------------------------
 local function iox_tick(t)
-  if not IOX.socket_telem then return end
+  if not IOX.socket then return end
 
-  -- 1. Telemetria do jogador
-  local payload = get_self_data(t)
-  if payload then
-    IOX.socket_telem:send(json_flat(payload))
+  -- 1. Dados do jogador
+  local self_data = get_self_data(t)
+  local self_lat  = self_data and self_data.lat or 0
+  local self_lon  = self_data and self_data.lon or 0
+
+  -- 2. Contacts via LoGetWorldObjects
+  local contacts_json = get_contacts(self_lat, self_lon)
+
+  -- 3. Monta payload único e envia
+  local payload
+  if self_data then
+    local self_json = json_flat(self_data)
+    -- Injeta contacts dentro do mesmo pacote
+    self_json = self_json:sub(1, -2) .. ',"contacts":' .. contacts_json .. '}'
+    payload = self_json
+  else
+    payload = string.format(
+      '{"msg_type":"contacts","timestamp":%.3f,"contacts":%s}',
+      t, contacts_json)
   end
 
-  -- 2. Contacts via arquivo (a cada 1s)
-  read_contacts_from_file(t)
+  IOX.socket:send(payload)
 end
 
 function LuaExportActivityNextEvent(t)

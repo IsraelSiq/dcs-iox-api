@@ -1,5 +1,6 @@
 # server/main.py
-# Entry point: starts UDP listeners (7778 telemetry + 7779 contacts) + FastAPI
+# Entry point: starts UDP listener (7778 telemetry + contacts) + FastAPI
+# Contacts chegam embutidos no mesmo pacote da telemetria via LoGetWorldObjects()
 import asyncio
 import json
 import logging
@@ -28,66 +29,12 @@ log = logging.getLogger("iox-api")
 # ----------------------------------------------------------------
 # Config via env vars
 # ----------------------------------------------------------------
-UDP_HOST             = os.getenv("UDP_HOST",             "127.0.0.1")
-UDP_PORT_TELEMETRY   = int(os.getenv("UDP_PORT_TELEMETRY", "7778"))   # Export.lua
-UDP_PORT_CONTACTS    = int(os.getenv("UDP_PORT_CONTACTS",  "7779"))   # MissionScript.lua
+UDP_HOST           = os.getenv("UDP_HOST",           "127.0.0.1")
+UDP_PORT_TELEMETRY = int(os.getenv("UDP_PORT_TELEMETRY", "7778"))
 
 
 # ----------------------------------------------------------------
-# Protocol: player telemetry (Export.lua -> 7778)
-# ----------------------------------------------------------------
-class TelemetryProtocol(asyncio.DatagramProtocol):
-    def connection_made(self, transport):
-        self.transport = transport
-        log.info(f"UDP telemetry  ready on {UDP_HOST}:{UDP_PORT_TELEMETRY}")
-
-    def datagram_received(self, data: bytes, addr):
-        shared.packet_count += 1
-        try:
-            payload = json.loads(data.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
-            return
-
-        payload.pop("msg_type", None)
-        raw_contacts = payload.pop("contacts", [])
-        if raw_contacts:
-            _ingest_contacts(raw_contacts, time.time())
-
-        try:
-            shared.latest_state = AircraftState(**payload)
-        except Exception as e:
-            log.warning(f"[telemetry] failed to parse AircraftState: {e}")
-
-    def error_received(self, exc):
-        log.warning(f"[telemetry] UDP error: {exc}")
-
-
-# ----------------------------------------------------------------
-# Protocol: contacts (MissionScript.lua -> 7779)
-# ----------------------------------------------------------------
-class ContactsProtocol(asyncio.DatagramProtocol):
-    def connection_made(self, transport):
-        self.transport = transport
-        log.info(f"UDP contacts   ready on {UDP_HOST}:{UDP_PORT_CONTACTS}")
-
-    def datagram_received(self, data: bytes, addr):
-        try:
-            payload = json.loads(data.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
-            log.warning(f"[contacts] JSON invalido recebido de {addr}: {data[:80]}")
-            return
-
-        raw_contacts = payload.get("contacts", [])
-        ts           = payload.get("timestamp", time.time())
-        log.info(f"[contacts] UDP recebido de {addr}: {len(raw_contacts)} contato(s), ts={ts:.1f}")
-        _ingest_contacts(raw_contacts, ts)
-
-    def error_received(self, exc):
-        log.warning(f"[contacts] UDP error: {exc}")
-
-
-# ----------------------------------------------------------------
-# Shared contacts ingestion
+# Contacts ingestion
 # ----------------------------------------------------------------
 def _ingest_contacts(raw_contacts: list, timestamp: float):
     new_contacts: dict = {}
@@ -101,11 +48,10 @@ def _ingest_contacts(raw_contacts: list, timestamp: float):
     shared.contacts           = new_contacts
     shared.contacts_timestamp = timestamp
 
-    # Salva no log de contatos
     entry = {
         "received_at": datetime.datetime.now().strftime("%H:%M:%S"),
-        "ts": round(timestamp, 2),
-        "count": len(new_contacts),
+        "ts":          round(timestamp, 2),
+        "count":       len(new_contacts),
         "contacts": [
             {
                 "id":          c.id,
@@ -129,26 +75,49 @@ def _ingest_contacts(raw_contacts: list, timestamp: float):
 
 
 # ----------------------------------------------------------------
+# Protocol: telemetria + contacts no mesmo pacote (Export.lua -> 7778)
+# ----------------------------------------------------------------
+class TelemetryProtocol(asyncio.DatagramProtocol):
+    def connection_made(self, transport):
+        self.transport = transport
+        log.info(f"UDP ready on {UDP_HOST}:{UDP_PORT_TELEMETRY}")
+
+    def datagram_received(self, data: bytes, addr):
+        shared.packet_count += 1
+        try:
+            payload = json.loads(data.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            return
+
+        # Extrai contacts embutidos (LoGetWorldObjects via Export.lua)
+        raw_contacts = payload.pop("contacts", [])
+        if raw_contacts:
+            _ingest_contacts(raw_contacts, time.time())
+
+        # Parseia telemetria do jogador
+        payload.pop("msg_type", None)
+        try:
+            shared.latest_state = AircraftState(**payload)
+        except Exception as e:
+            log.warning(f"[telemetry] failed to parse AircraftState: {e}")
+
+    def error_received(self, exc):
+        log.warning(f"[telemetry] UDP error: {exc}")
+
+
+# ----------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------
 async def main():
     shared.start_time = time.time()
     loop = asyncio.get_running_loop()
 
-    transport_telemetry, _ = await loop.create_datagram_endpoint(
+    transport, _ = await loop.create_datagram_endpoint(
         TelemetryProtocol,
         local_addr=(UDP_HOST, UDP_PORT_TELEMETRY),
     )
 
-    transport_contacts, _ = await loop.create_datagram_endpoint(
-        ContactsProtocol,
-        local_addr=(UDP_HOST, UDP_PORT_CONTACTS),
-    )
-
-    log.info(
-        f"[dcs-iox-api] UDP telemetry={UDP_HOST}:{UDP_PORT_TELEMETRY}  "
-        f"contacts={UDP_HOST}:{UDP_PORT_CONTACTS}"
-    )
+    log.info(f"[dcs-iox-api] UDP={UDP_HOST}:{UDP_PORT_TELEMETRY}  (telemetry + contacts)")
 
     config = uvicorn.Config(
         "server.api:app",
@@ -165,8 +134,7 @@ async def main():
     except (KeyboardInterrupt, asyncio.CancelledError):
         log.info("Shutdown signal received")
     finally:
-        transport_telemetry.close()
-        transport_contacts.close()
+        transport.close()
         log.info("[dcs-iox-api] Shutdown complete")
 
 
