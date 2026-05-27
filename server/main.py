@@ -59,6 +59,8 @@ class IOXProtocol(asyncio.DatagramProtocol):
         else:  # 'self' or legacy packet (contacts embedded)
             try:
                 raw_contacts = payload.pop("contacts", [])
+                payload.pop("msg_type", None)  # fix: remove antes de instanciar o modelo
+
                 if raw_contacts:
                     new_contacts = {}
                     for c in raw_contacts:
