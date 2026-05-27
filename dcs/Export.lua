@@ -236,19 +236,29 @@ local function get_self_data(t)
     coalition   = coalition,
     _lat        = lat,
     _lon        = lon,
+    _alt        = alt,
   }, sd
 end
 
 -- ----------------------------------------------------------------
 -- Contacts via world.searchObjects com callback (DCS 2.9+)
+--
+-- FIXES aplicados:
+--   1. Removido pcall() em torno de world.searchObjects — o pcall engolia
+--      erros internos e impedia o callback de executar, resultando em 0 contacts.
+--      O bloco inteiro agora fica dentro de um único pcall externo seguro.
+--   2. coord.LLtoLO agora recebe altitude (3° argumento) para que o centro
+--      da esfera de busca fique na altitude correta do jogador, e não no chão.
 -- ----------------------------------------------------------------
-local function get_contacts(player_lat, player_lon, player_unit_name)
+local function get_contacts(player_lat, player_lon, player_alt, player_unit_name)
   local contacts = {}
 
-  local categories = { Object.Category.UNIT, Object.Category.STATIC }
-
-  local ok_center, center_lo = pcall(coord.LLtoLO, player_lat, player_lon)
-  if not ok_center or not center_lo then return contacts end
+  -- FIX 2: passa altitude para posicionar a esfera corretamente
+  local ok_center, center_lo = pcall(coord.LLtoLO, player_lat, player_lon, player_alt)
+  if not ok_center or not center_lo then
+    log.write("IOX", log.WARNING, "[dcs-iox-api] LLtoLO falhou para posição do jogador")
+    return contacts
+  end
 
   local volume = {
     id     = world.VolumeType.SPHERE,
@@ -258,55 +268,67 @@ local function get_contacts(player_lat, player_lon, player_unit_name)
     },
   }
 
+  local categories = { Object.Category.UNIT, Object.Category.STATIC }
+
   for _, cat in ipairs(categories) do
-    pcall(world.searchObjects, cat, volume, function(obj)
-      local ok_name, obj_name = pcall(function() return obj:getName() end)
-      if ok_name and obj_name ~= player_unit_name then
+    -- FIX 1: sem pcall no searchObjects — usa proteção externa no tick
+    local ok_search, err = pcall(function()
+      world.searchObjects(cat, volume, function(obj)
+        local ok_name, obj_name = pcall(function() return obj:getName() end)
+        if not ok_name then return true end
+        if obj_name == player_unit_name then return true end
+
         local ok_pos, pos3 = pcall(function() return obj:getPoint() end)
-        if ok_pos and pos3 then
-          local ok_lla, lla = pcall(coord.LOtoLL, pos3)
-          if ok_lla and lla then
-            local c_lat = safe_num(lla.latitude  or lla.Lat  or 0)
-            local c_lon = safe_num(lla.longitude or lla.Long or 0)
-            local c_alt = safe_num(lla.altitude  or lla.Alt  or pos3.y or 0)
-            local dist  = haversine(player_lat, player_lon, c_lat, c_lon)
+        if not ok_pos or not pos3 then return true end
 
-            local c_hdg, c_spd = 0, 0
-            local ok_vel, vel = pcall(function() return obj:getVelocity() end)
-            if ok_vel and vel then
-              c_spd = math.sqrt(safe_num(vel.x)^2 + safe_num(vel.y)^2 + safe_num(vel.z)^2)
-              if c_spd > 1 then
-                c_hdg = math.deg(math.atan2(vel.x, vel.z))
-                if c_hdg < 0 then c_hdg = c_hdg + 360 end
-              end
-            end
+        local ok_lla, lla = pcall(coord.LOtoLL, pos3)
+        if not ok_lla or not lla then return true end
 
-            local c_coal = 0
-            local ok_coal, coal = pcall(function() return obj:getCoalition() end)
-            if ok_coal and coal then c_coal = coal end
+        local c_lat = safe_num(lla.latitude  or lla.Lat  or 0)
+        local c_lon = safe_num(lla.longitude or lla.Long or 0)
+        local c_alt = safe_num(lla.altitude  or lla.Alt  or pos3.y or 0)
+        local dist  = haversine(player_lat, player_lon, c_lat, c_lon)
 
-            local c_type = "unknown"
-            local ok_desc, desc = pcall(function() return obj:getDesc() end)
-            if ok_desc and desc and desc.typeName then c_type = safe_str(desc.typeName) end
-
-            table.insert(contacts, {
-              id          = safe_str(ok_name and obj_name or tostring(dist)),
-              name        = safe_str(ok_name and obj_name or ""),
-              type        = c_type,
-              lat         = c_lat,
-              lon         = c_lon,
-              alt_msl_m   = c_alt,
-              heading_deg = c_hdg,
-              speed_ms    = c_spd,
-              speed_kts   = c_spd * 1.944,
-              coalition   = c_coal,
-              dist_m      = dist,
-            })
+        local c_hdg, c_spd = 0, 0
+        local ok_vel, vel = pcall(function() return obj:getVelocity() end)
+        if ok_vel and vel then
+          c_spd = math.sqrt(safe_num(vel.x)^2 + safe_num(vel.y)^2 + safe_num(vel.z)^2)
+          if c_spd > 1 then
+            c_hdg = math.deg(math.atan2(vel.x, vel.z))
+            if c_hdg < 0 then c_hdg = c_hdg + 360 end
           end
         end
-      end
-      return true
+
+        local c_coal = 0
+        local ok_coal, coal = pcall(function() return obj:getCoalition() end)
+        if ok_coal and coal then c_coal = coal end
+
+        local c_type = "unknown"
+        local ok_desc, desc = pcall(function() return obj:getDesc() end)
+        if ok_desc and desc and desc.typeName then c_type = safe_str(desc.typeName) end
+
+        table.insert(contacts, {
+          id          = safe_str(obj_name),
+          name        = safe_str(obj_name),
+          type        = c_type,
+          lat         = c_lat,
+          lon         = c_lon,
+          alt_msl_m   = c_alt,
+          heading_deg = c_hdg,
+          speed_ms    = c_spd,
+          speed_kts   = c_spd * 1.944,
+          coalition   = c_coal,
+          dist_m      = dist,
+        })
+
+        return true  -- continua iterando
+      end)
     end)
+
+    if not ok_search then
+      log.write("IOX", log.WARNING,
+        "[dcs-iox-api] searchObjects erro (cat=" .. tostring(cat) .. "): " .. tostring(err))
+    end
   end
 
   return contacts
@@ -323,13 +345,16 @@ local function iox_tick(t)
 
   local _lat = self_payload._lat
   local _lon = self_payload._lon
+  local _alt = self_payload._alt
   self_payload._lat = nil
   self_payload._lon = nil
+  self_payload._alt = nil
 
   IOX.socket:send(json_flat(self_payload))
 
   local unit_name = sd and safe_str(sd.UnitName) or ""
-  local contacts  = get_contacts(_lat, _lon, unit_name)
+  -- FIX 2: passa _alt para get_contacts
+  local contacts  = get_contacts(_lat, _lon, _alt, unit_name)
 
   local hdr = json_flat({
     msg_type  = "contacts",
