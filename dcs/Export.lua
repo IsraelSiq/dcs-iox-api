@@ -1,23 +1,20 @@
 -- =============================================================
 -- dcs-iox-api | Export.lua  (DCS 2.9+)
--- Envia APENAS telemetria do jogador via UDP -> 127.0.0.1:7778
---
--- Contacts são enviados pelo MissionScript.lua (porta 7779)
--- pois world.searchObjects NÃO está disponível no Export environment.
+-- Envia telemetria do jogador + contacts (injetados pelo MissionScript)
+-- via UDP JSON -> 127.0.0.1:7778  (~30 Hz)
 --
 -- INSTALAÇÃO:
---   Copie este arquivo para:
---   %USERPROFILE%\Saved Games\DCS\Scripts\Export.lua
---
---   Se já existir um Export.lua (Tacview, SRS, etc.),
---   NAO substitua — adicione o bloco IOX no final do arquivo existente.
+--   Copie para: %USERPROFILE%\Saved Games\DCS\Scripts\Export.lua
+--   Se já existir Export.lua (Tacview, SRS...), adicione ao final.
 -- =============================================================
 
 local IOX = {}
-IOX.host            = "127.0.0.1"
-IOX.port            = 7778
-IOX.socket          = nil
-IOX.update_interval = 0.033   -- ~30 Hz
+IOX.host               = "127.0.0.1"
+IOX.port               = 7778
+IOX.socket             = nil
+IOX.update_interval    = 0.033   -- ~30 Hz
+IOX.pending_contacts    = nil    -- preenchido pelo MissionScript via net.dostring_in
+IOX.pending_contacts_ts = 0
 
 -- ----------------------------------------------------------------
 -- Helpers
@@ -75,9 +72,7 @@ local function load_socket()
   ok, sock = pcall(require, "socket.core")
   if ok and sock then
     local M = {}
-    function M.udp()
-      return sock.udp()
-    end
+    function M.udp() return sock.udp() end
     return M
   end
 
@@ -208,13 +203,45 @@ local function get_self_data(t)
 end
 
 -- ----------------------------------------------------------------
--- Loop principal ~30 Hz — somente telemetria do jogador
+-- Serializa contacts pendentes (injetados pelo MissionScript)
+-- IOX.pending_contacts é uma string JSON (json_array já serializado)
+-- ----------------------------------------------------------------
+local function get_contacts_json(t)
+  local json_body = IOX.pending_contacts
+  if not json_body then return nil end
+
+  -- monta a mensagem completa
+  local count_str = "0"
+  -- conta entradas pelo número de "{" no array (aproximação suficiente)
+  local n = 0
+  for _ in json_body:gmatch("{[") do n = n + 1 end
+
+  return string.format(
+    '{"msg_type":"contacts","timestamp":%.3f,"count":%d,"contacts":%s}',
+    IOX.pending_contacts_ts, n, json_body
+  )
+end
+
+-- ----------------------------------------------------------------
+-- Loop principal ~30 Hz
 -- ----------------------------------------------------------------
 local function iox_tick(t)
   if not IOX.socket then return end
+
+  -- 1. Telemetria do jogador
   local payload = get_self_data(t)
-  if not payload then return end
-  IOX.socket:send(json_flat(payload))
+  if payload then
+    IOX.socket:send(json_flat(payload))
+  end
+
+  -- 2. Contacts (se houver pendentes do MissionScript)
+  local contacts_msg = get_contacts_json(t)
+  if contacts_msg then
+    IOX.socket:send(contacts_msg)
+    -- limpa depois de enviar para não repetir o mesmo frame infinitamente
+    -- MissionScript vai injetar novos a cada 1s
+    IOX.pending_contacts = nil
+  end
 end
 
 function LuaExportActivityNextEvent(t)

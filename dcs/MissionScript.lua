@@ -2,25 +2,23 @@
 -- dcs-iox-api | MissionScript.lua  (DCS 2.9+)
 --
 -- Roda DENTRO da missão via trigger "DO SCRIPT FILE".
--- Tem acesso completo a world.searchObjects, Unit, coalition, etc.
--- Envia contacts JSON via UDP -> 127.0.0.1:7779
+-- NÃO usa luasocket (indisponível no Mission environment).
+-- Passa contacts para o Export environment via net.dostring_in.
 --
 -- INSTALAÇÃO:
 --   1. No Mission Editor, crie um trigger:
---        Condition : TIME MORE (1)   (dispara 1 segundo após a missão iniciar)
---        Action    : DO SCRIPT FILE  -> selecione este arquivo
---   2. Salve a missão. Toda vez que entrar nela o script inicia automaticamente.
+--        Type      : ONCE
+--        Condition : TIME MORE (1)
+--        Action    : DO SCRIPT FILE -> selecione este arquivo
+--   2. Salve a missão.
 -- =============================================================
 
 local IOXM = {}
-IOXM.host            = "127.0.0.1"
-IOXM.port            = 7779            -- porta separada da telemetria do jogador (7778)
-IOXM.update_interval = 1.0             -- contacts a 1 Hz (suficiente, menos carga)
-IOXM.radar_range_m   = 150000          -- 150 km
-IOXM.socket          = nil
+IOXM.update_interval = 1.0        -- contacts a 1 Hz
+IOXM.radar_range_m   = 150000     -- 150 km
 
 -- ----------------------------------------------------------------
--- Helpers JSON mínimos (sem dependência externa)
+-- Helpers JSON mínimos
 -- ----------------------------------------------------------------
 local function safe_num(v)
   if type(v) == "number" and v == v then return v else return 0 end
@@ -30,11 +28,12 @@ local function safe_str(v)
   if type(v) == "string" then return v else return "" end
 end
 
-local function json_str(s)
+local function json_escape(s)
   s = tostring(s or "")
-  s = s:gsub('\\','\\\\'):gsub('"','\\"'):gsub('\n','\\n'):gsub('\r','\\r')
-  return '"' .. s .. '"'
+  return s:gsub('\\','\\\\'):gsub('"','\\"'):gsub('\n','\\n'):gsub('\r','\\r')
 end
+
+local function json_str(s)  return '"' .. json_escape(s) .. '"' end
 
 local function json_flat(t)
   local parts = {}
@@ -70,42 +69,13 @@ local function haversine(lat1, lon1, lat2, lon2)
 end
 
 -- ----------------------------------------------------------------
--- Inicializa socket
--- ----------------------------------------------------------------
-local function init_socket()
-  local ok, sock_lib = pcall(require, "socket")
-  if not ok or not sock_lib then
-    env.info("[IOX-Mission] luasocket não encontrado: " .. tostring(sock_lib))
-    return false
-  end
-  local ok2, udp = pcall(function() return sock_lib.udp() end)
-  if not ok2 or not udp then
-    env.info("[IOX-Mission] Falha ao criar UDP socket: " .. tostring(udp))
-    return false
-  end
-  udp:setsockname("*", 0)
-  udp:setpeername(IOXM.host, IOXM.port)
-  IOXM.socket = udp
-  env.info("[IOX-Mission] Socket OK -> " .. IOXM.host .. ":" .. IOXM.port)
-  return true
-end
-
--- ----------------------------------------------------------------
--- Descobre o jogador local (slot 1, coalition qualquer)
+-- Descobre a unidade do jogador
 -- ----------------------------------------------------------------
 local function get_player_unit()
-  -- Tenta pelo nome genérico que o DCS atribui ao slot
-  local slot_names = { "Pilot", "pilot", "Player", "player" }
-  for _, name in ipairs(slot_names) do
-    local u = Unit.getByName(name)
-    if u and u:isExist() then return u end
-  end
-  -- Fallback: varre todos os grupos de todas as coalitions
   for _, coal in ipairs({coalition.side.RED, coalition.side.BLUE, coalition.side.NEUTRAL}) do
-    for _, group in ipairs(coalition.getGroups(coal, Group.Category.AIRPLANE) or {}) do
-      for _, unit in ipairs(group:getUnits() or {}) do
-        if unit:isActive() and unit:isExist() then
-          -- pega o primeiro ativo como aproximação
+    for _, grp in ipairs(coalition.getGroups(coal) or {}) do
+      for _, unit in ipairs(grp:getUnits() or {}) do
+        if unit:isActive() and unit:isExist() and unit:getPlayerName() ~= nil then
           return unit
         end
       end
@@ -115,35 +85,31 @@ local function get_player_unit()
 end
 
 -- ----------------------------------------------------------------
--- Coleta contacts ao redor do jogador
+-- Coleta contacts usando world.searchObjects (disponível aqui)
 -- ----------------------------------------------------------------
 local function collect_contacts(player_unit)
-  local contacts = {}
-  local player_name = player_unit:getName()
-  local center_pt   = player_unit:getPoint()
-
-  local lla_player  = coord.LOtoLL(center_pt)
-  local p_lat = safe_num(lla_player.latitude)
-  local p_lon = safe_num(lla_player.longitude)
+  local contacts  = {}
+  local pname     = player_unit:getName()
+  local center_pt = player_unit:getPoint()
+  local plla      = coord.LOtoLL(center_pt)
+  local p_lat     = safe_num(plla.latitude)
+  local p_lon     = safe_num(plla.longitude)
 
   local volume = {
     id     = world.VolumeType.SPHERE,
     params = { point = center_pt, radius = IOXM.radar_range_m },
   }
 
-  local categories = { Object.Category.UNIT, Object.Category.STATIC }
-
-  for _, cat in ipairs(categories) do
+  for _, cat in ipairs({ Object.Category.UNIT, Object.Category.STATIC }) do
     world.searchObjects(cat, volume, function(obj)
-      local ok_name, obj_name = pcall(function() return obj:getName() end)
-      if not ok_name then return true end
-      if obj_name == player_name then return true end  -- ignora o próprio jogador
+      local ok_n, oname = pcall(function() return obj:getName() end)
+      if not ok_n or oname == pname then return true end
 
-      local ok_pos, pos3 = pcall(function() return obj:getPoint() end)
-      if not ok_pos or not pos3 then return true end
+      local ok_p, pos3 = pcall(function() return obj:getPoint() end)
+      if not ok_p or not pos3 then return true end
 
-      local ok_lla, lla = pcall(coord.LOtoLL, pos3)
-      if not ok_lla or not lla then return true end
+      local ok_l, lla = pcall(coord.LOtoLL, pos3)
+      if not ok_l or not lla then return true end
 
       local c_lat = safe_num(lla.latitude)
       local c_lon = safe_num(lla.longitude)
@@ -151,8 +117,8 @@ local function collect_contacts(player_unit)
       local dist  = haversine(p_lat, p_lon, c_lat, c_lon)
 
       local c_hdg, c_spd = 0, 0
-      local ok_vel, vel = pcall(function() return obj:getVelocity() end)
-      if ok_vel and vel then
+      local ok_v, vel = pcall(function() return obj:getVelocity() end)
+      if ok_v and vel then
         c_spd = math.sqrt(safe_num(vel.x)^2 + safe_num(vel.y)^2 + safe_num(vel.z)^2)
         if c_spd > 1 then
           c_hdg = math.deg(math.atan2(vel.x, vel.z))
@@ -161,19 +127,18 @@ local function collect_contacts(player_unit)
       end
 
       local c_coal = 0
-      local ok_coal, coal_val = pcall(function() return obj:getCoalition() end)
-      if ok_coal and coal_val then c_coal = coal_val end
+      local ok_c, cv = pcall(function() return obj:getCoalition() end)
+      if ok_c and cv then c_coal = cv end
 
       local c_type = "unknown"
-      local ok_desc, desc = pcall(function() return obj:getDesc() end)
-      if ok_desc and desc and desc.typeName then c_type = safe_str(desc.typeName) end
+      local ok_d, desc = pcall(function() return obj:getDesc() end)
+      if ok_d and desc and desc.typeName then c_type = safe_str(desc.typeName) end
 
-      local c_cat = "unit"
-      if cat == Object.Category.STATIC then c_cat = "static" end
+      local c_cat = (cat == Object.Category.STATIC) and "static" or "unit"
 
       table.insert(contacts, {
-        id          = safe_str(obj_name),
-        name        = safe_str(obj_name),
+        id          = safe_str(oname),
+        name        = safe_str(oname),
         type        = c_type,
         category    = c_cat,
         lat         = c_lat,
@@ -185,65 +150,58 @@ local function collect_contacts(player_unit)
         coalition   = c_coal,
         dist_m      = dist,
       })
-
       return true
     end)
   end
 
-  env.info(string.format("[IOX-Mission] contacts coletados: %d", #contacts))
   return contacts, p_lat, p_lon
 end
 
 -- ----------------------------------------------------------------
--- Tick principal
+-- Tick: coleta contacts e injeta no Export environment
 -- ----------------------------------------------------------------
 local function ioxm_tick()
-  if not IOXM.socket then return end
-
   local player = get_player_unit()
   if not player then
-    env.info("[IOX-Mission] nenhum player encontrado, aguardando...")
+    env.info("[IOX-Mission] aguardando player...")
     return
   end
 
-  local ok_contacts, contacts, p_lat, p_lon = pcall(collect_contacts, player)
-  if not ok_contacts then
-    env.info("[IOX-Mission] erro em collect_contacts: " .. tostring(contacts))
+  local ok, contacts = pcall(collect_contacts, player)
+  if not ok then
+    env.info("[IOX-Mission] erro collect_contacts: " .. tostring(contacts))
     return
   end
 
-  local t = timer.getTime()
-  local hdr = json_flat({
-    msg_type  = "contacts",
-    timestamp = t,
-    count     = #contacts,
-  })
-  local msg = hdr:sub(1, -2) .. ',"contacts":' .. json_array(contacts) .. "}"
+  local t         = timer.getTime()
+  local json_body = json_array(contacts)
 
-  local ok_send, err = pcall(function() IOXM.socket:send(msg) end)
-  if not ok_send then
-    env.info("[IOX-Mission] erro ao enviar UDP: " .. tostring(err))
+  -- Escapa a string JSON para embutir como literal Lua
+  -- Usa string.format com %q para escapar aspas e barras
+  local lua_code = string.format(
+    'if IOX then IOX.pending_contacts = %s IOX.pending_contacts_ts = %.3f end',
+    json_body, t
+  )
+
+  -- net.dostring_in executa o código no Export environment
+  -- onde IOX já existe e o socket UDP está aberto
+  local ok2, err = pcall(net.dostring_in, "export", lua_code)
+  if not ok2 then
+    env.info("[IOX-Mission] net.dostring_in falhou: " .. tostring(err))
+  else
+    env.info(string.format("[IOX-Mission] %d contact(s) -> Export env", #contacts))
   end
 end
 
 -- ----------------------------------------------------------------
--- Scheduler via timer.scheduleFunction
+-- Scheduler
 -- ----------------------------------------------------------------
 local function schedule_tick(_, time)
   local ok, err = pcall(ioxm_tick)
-  if not ok then
-    env.info("[IOX-Mission] tick error: " .. tostring(err))
-  end
+  if not ok then env.info("[IOX-Mission] tick error: " .. tostring(err)) end
   return time + IOXM.update_interval
 end
 
--- ----------------------------------------------------------------
--- Entry point — chamado quando o trigger DO SCRIPT FILE dispara
--- ----------------------------------------------------------------
-env.info("[IOX-Mission] Inicializando...")
-if init_socket() then
-  timer.scheduleFunction(schedule_tick, nil, timer.getTime() + 1)
-  env.info("[IOX-Mission] Scheduler iniciado. Contacts a cada " .. IOXM.update_interval .. "s")
-else
-  env.info("[IOX-Mission] FALHA na inicialização — contacts não serão enviados")
-end
+env.info("[IOX-Mission] Inicializando (net.dostring_in bridge)...")
+timer.scheduleFunction(schedule_tick, nil, timer.getTime() + 1)
+env.info("[IOX-Mission] Scheduler iniciado. Contacts a cada " .. IOXM.update_interval .. "s")
