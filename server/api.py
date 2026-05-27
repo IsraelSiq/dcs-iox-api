@@ -159,7 +159,7 @@ async def get_telemetry():
 
 @app.get("/contacts", tags=["Radar"])
 async def get_contacts():
-    """Current contacts within 100km, sorted by distance."""
+    """Current contacts within radar range, sorted by distance."""
     contacts = sorted(shared.contacts.values(), key=lambda c: c.dist_m)
     return {
         "count": len(contacts),
@@ -362,7 +362,7 @@ function drawADI(pitch,bank){
   ctx.save();ctx.translate(ADI_CX,ADI_CY);
   ctx.strokeStyle='#4a6a4a';ctx.lineWidth=1;
   for(const a of[-60,-45,-30,-20,-10,0,10,20,30,45,60]){const r=(a-90)*Math.PI/180;ctx.beginPath();ctx.moveTo(Math.cos(r)*(ADI_R-14),Math.sin(r)*(ADI_R-14));ctx.lineTo(Math.cos(r)*(ADI_R-6),Math.sin(r)*(ADI_R-6));ctx.stroke();}
-  ctx.rotate(bank*Math.PI/180);ctx.fillStyle='#39ff6e';ctx.beginPath();ctx.moveTo(0,-(ADI_R-14));ctx.lineTo(-5,-(ADI_R-4));ctx.lineTo(5,-(ADI_R-4));ctx.closePath();ctx.fill();
+  ctx.rotate(bank*Math.PI/180);ctx.fillStyle='#39ff6e';ctx.beginPath();ctx.moveTo(0,-(ADI_R-14));ctx.lineTo(-5,-(ADI_R-4));ctx.lineTo(0,2);ctx.lineTo(5,-(ADI_R-4));ctx.closePath();ctx.fill();
   ctx.restore();
   ctx.save();ctx.translate(ADI_CX,ADI_CY);ctx.strokeStyle='#ffb830';ctx.lineWidth=2.5;ctx.lineCap='round';
   ctx.beginPath();ctx.moveTo(-50,0);ctx.lineTo(-10,0);ctx.moveTo(10,0);ctx.lineTo(50,0);ctx.stroke();
@@ -429,7 +429,7 @@ drawADI(0,0);drawHeadingTape(0);initWS();
 # ----------------------------------------------------------------
 @app.get("/radar", response_class=HTMLResponse, tags=["Radar"], include_in_schema=False)
 async def radar():
-    """PPI Tactical Radar — 100km range, IFF colors, 10Hz WebSocket."""
+    """PPI Tactical Radar — range configuravel, IFF + source colors, 10Hz WebSocket."""
     html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -441,7 +441,7 @@ async def radar():
   :root{
     --bg:#050a05;--panel:#080d08;--border:#0f1f0f;
     --green:#39ff6e;--green-dim:#0f3a1f;--green-mid:#1a7a35;
-    --amber:#ffb830;--red:#ff4040;--blue:#40c8ff;
+    --amber:#ffb830;--red:#ff4040;--blue:#40c8ff;--cyan:#00e5ff;
     --neutral:#aaaaaa;--text:#a0d0a0;--muted:#3a5a3a;
     --font:'Share Tech Mono',monospace;--hud:'Orbitron',sans-serif;
     --glow:0 0 10px rgba(57,255,110,0.4);
@@ -465,7 +465,7 @@ async def radar():
   .kv:last-child{border-bottom:none}
   .kv-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
   .kv-value{font-family:var(--hud);font-size:13px;color:var(--green)}
-  #contact-list{display:flex;flex-direction:column;gap:2px;max-height:320px;overflow-y:auto}
+  #contact-list{display:flex;flex-direction:column;gap:2px;max-height:280px;overflow-y:auto}
   .contact-row{display:grid;grid-template-columns:12px 1fr 60px 50px;gap:6px;align-items:center;padding:4px 6px;border-radius:3px;border:1px solid transparent;cursor:pointer;transition:background .15s;font-size:11px;}
   .contact-row:hover{background:rgba(57,255,110,.06);border-color:var(--border)}
   .contact-row.selected{background:rgba(57,255,110,.1);border-color:var(--green-mid)}
@@ -476,6 +476,7 @@ async def radar():
   .legend{display:flex;flex-direction:column;gap:6px}
   .legend-item{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted)}
   .legend-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  .legend-sep{border-top:1px solid var(--border);margin:6px 0}
   .range-btns{display:flex;gap:6px;flex-wrap:wrap}
   .range-btn{padding:3px 10px;background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--font);font-size:11px;border-radius:3px;cursor:pointer;transition:all .15s;}
   .range-btn:hover{border-color:var(--green-mid);color:var(--text)}
@@ -486,7 +487,7 @@ async def radar():
 </head>
 <body>
 <div id="topbar">
-  <div class="logo">DCS IOX<span>RADAR PPI v0.2</span></div>
+  <div class="logo">DCS IOX<span>RADAR PPI v0.3</span></div>
   <div style="display:flex;gap:16px;align-items:center;font-size:11px">
     <span style="color:var(--muted)">RANGE: <span id="range-label" style="color:var(--green)">100 km</span></span>
     <span style="color:var(--muted)">CONTACTS: <span id="contact-count" style="color:var(--green)">0</span></span>
@@ -520,9 +521,14 @@ async def radar():
     <div class="side-section">
       <div class="side-title">LEGEND</div>
       <div class="legend">
-        <div class="legend-item"><div class="legend-dot" style="background:#39ff6e"></div>Friendly</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#ff4040"></div>Enemy</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#39ff6e"></div>Friendly (IFF)</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ff4040"></div>Enemy (IFF)</div>
         <div class="legend-item"><div class="legend-dot" style="background:#ffb830"></div>Neutral / Unknown</div>
+        <div class="legend-sep"></div>
+        <div class="legend-item"><div class="legend-dot" style="background:#39ff6e;opacity:.5;border:1px solid #39ff6e"></div>Source: Search</div>
+        <div class="legend-item"><div class="legend-dot" style="background:none;border:2px solid #40c8ff"></div>Source: AWACS only</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ffb830;border-radius:2px"></div>Source: Both</div>
+        <div class="legend-sep"></div>
         <div class="legend-item"><div class="legend-dot" style="background:#40c8ff;border-radius:2px;width:14px;height:6px"></div>Own Ship</div>
       </div>
     </div>
@@ -549,10 +555,22 @@ function setRange(r){
   draw();
 }
 
+// Cor base pelo IFF (coalicao)
 function iffColor(coal){
-  if(coal===1)return'#39ff6e';
-  if(coal===2)return'#ff4040';
-  return'#ffb830';
+  if(coal===1) return '#39ff6e';  // Friendly — verde
+  if(coal===2) return '#ff4040';  // Enemy    — vermelho
+  return '#ffb830';               // Neutral  — ambar
+}
+
+// Modificador visual pelo source do contato
+// Retorna { fillColor, strokeColor, shape }
+// shape: 'circle' | 'diamond' | 'circle-outline'
+function sourceStyle(c){
+  const base = iffColor(c.coalition);
+  const src  = c.source || 'search';
+  if(src === 'awacs') return { fill: 'transparent', stroke: '#40c8ff', shape: 'circle-outline' };
+  if(src === 'both')  return { fill: '#ffb830',      stroke: '#ffb830', shape: 'diamond' };
+  return { fill: base, stroke: base, shape: 'circle' };
 }
 
 function haversine(lat1,lon1,lat2,lon2){
@@ -568,26 +586,53 @@ function bearing(lat1,lon1,lat2,lon2){
   return(Math.atan2(y,x)*180/Math.PI+360)%360;
 }
 
+function drawContactShape(cx,cy,style,size,selected){
+  const s = selected ? size*1.6 : size;
+  ctx.strokeStyle = style.stroke;
+  ctx.fillStyle   = style.fill;
+  ctx.lineWidth   = selected ? 2 : 1.5;
+
+  if(style.shape === 'circle-outline'){
+    ctx.beginPath();ctx.arc(cx,cy,s,0,Math.PI*2);
+    ctx.stroke();
+    // ponto central pequeno para localizar melhor
+    ctx.fillStyle=style.stroke;ctx.beginPath();ctx.arc(cx,cy,1.5,0,Math.PI*2);ctx.fill();
+  } else if(style.shape === 'diamond'){
+    ctx.beginPath();
+    ctx.moveTo(cx, cy-s);ctx.lineTo(cx+s,cy);
+    ctx.lineTo(cx, cy+s);ctx.lineTo(cx-s,cy);
+    ctx.closePath();ctx.fill();ctx.stroke();
+  } else {
+    ctx.beginPath();ctx.arc(cx,cy,s,0,Math.PI*2);
+    ctx.fill();
+    if(selected){ctx.strokeStyle='#ffffff';ctx.lineWidth=1;ctx.stroke();}
+  }
+}
+
 function draw(){
   const W=canvas.width,H=canvas.height,CX=W/2,CY=H/2,R=W/2-2;
   ctx.clearRect(0,0,W,H);
 
+  // Fundo
   const bgGrad=ctx.createRadialGradient(CX,CY,0,CX,CY,R);
   bgGrad.addColorStop(0,'#061406');bgGrad.addColorStop(1,'#020602');
   ctx.fillStyle=bgGrad;ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.fill();
 
+  // Aneis de distancia
   ctx.strokeStyle='rgba(57,255,110,0.08)';ctx.lineWidth=1;
   for(let i=1;i<=4;i++){ctx.beginPath();ctx.arc(CX,CY,R*i/4,0,Math.PI*2);ctx.stroke();}
 
+  // Linhas de azimute
   ctx.strokeStyle='rgba(57,255,110,0.05)';
   for(let a=0;a<360;a+=30){const rad=a*Math.PI/180;ctx.beginPath();ctx.moveTo(CX,CY);ctx.lineTo(CX+Math.sin(rad)*R,CY-Math.cos(rad)*R);ctx.stroke();}
 
+  // Labels de distancia
   ctx.fillStyle='rgba(57,255,110,0.3)';ctx.font='9px Share Tech Mono';ctx.textAlign='center';
   for(let i=1;i<=4;i++){const km=Math.round(radarRange/1000*i/4);ctx.fillText(km+'km',CX,CY-R*i/4+3);}
 
+  // Cardiais
   ctx.fillStyle='rgba(57,255,110,0.5)';ctx.font='11px Orbitron';
-  const dirs=['N','E','S','W'];const angles=[0,90,180,270];
-  dirs.forEach((d,i)=>{const rad=angles[i]*Math.PI/180;const x=CX+Math.sin(rad)*(R-14);const y=CY-Math.cos(rad)*(R-14);ctx.textAlign='center';ctx.fillText(d,x,y+4);});
+  ['N','E','S','W'].forEach((d,i)=>{const rad=i*90*Math.PI/180;const x=CX+Math.sin(rad)*(R-14);const y=CY-Math.cos(rad)*(R-14);ctx.textAlign='center';ctx.fillText(d,x,y+4);});
 
   ctx.save();ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.clip();
 
@@ -599,32 +644,46 @@ function draw(){
       const r=dist/radarRange*R;
       const rad=brg*Math.PI/180;
       const cx2=CX+Math.sin(rad)*r,cy2=CY-Math.cos(rad)*r;
-      const color=iffColor(c.coalition);
+      const style=sourceStyle(c);
       const isSelected=c.id===selectedId;
 
-      const glow=ctx.createRadialGradient(cx2,cy2,0,cx2,cy2,isSelected?16:10);
-      glow.addColorStop(0,color.replace(')',',0.3)').replace('rgb','rgba'));
-      glow.addColorStop(1,'transparent');
-      ctx.fillStyle=glow;ctx.beginPath();ctx.arc(cx2,cy2,isSelected?16:10,0,Math.PI*2);ctx.fill();
+      // Glow
+      const glowColor = style.stroke;
+      const glow=ctx.createRadialGradient(cx2,cy2,0,cx2,cy2,isSelected?18:12);
+      glow.addColorStop(0,glowColor+'44');glow.addColorStop(1,'transparent');
+      ctx.fillStyle=glow;ctx.beginPath();ctx.arc(cx2,cy2,isSelected?18:12,0,Math.PI*2);ctx.fill();
 
-      ctx.fillStyle=color;ctx.beginPath();ctx.arc(cx2,cy2,isSelected?5:3,0,Math.PI*2);ctx.fill();
+      // Forma do contato
+      drawContactShape(cx2,cy2,style,isSelected?5:3,isSelected);
 
+      // Vetor de direcao
       if(c.speed_ms>2){
         const hrad=c.heading_deg*Math.PI/180;
-        ctx.strokeStyle=color;ctx.lineWidth=1;ctx.globalAlpha=0.6;
+        ctx.strokeStyle=style.stroke;ctx.lineWidth=1;ctx.globalAlpha=0.6;
         ctx.beginPath();ctx.moveTo(cx2,cy2);ctx.lineTo(cx2+Math.sin(hrad)*14,cy2-Math.cos(hrad)*14);ctx.stroke();
         ctx.globalAlpha=1;
       }
 
-      ctx.fillStyle=isSelected?'#ffffff':color;
+      // Label nome
+      ctx.fillStyle=isSelected?'#ffffff':style.stroke;
       ctx.font=(isSelected?'bold ':'')+'10px Share Tech Mono';
       ctx.textAlign='left';
-      ctx.fillText(c.name||c.id,cx2+7,cy2-4);
+      ctx.fillText(c.name||c.id,cx2+8,cy2-4);
+
+      // Altitude
       const altFt=Math.round((c.alt_msl_m||0)*3.28084/100)*100;
       ctx.fillStyle='rgba(160,208,160,0.5)';ctx.font='9px Share Tech Mono';
-      ctx.fillText(altFt+'ft',cx2+7,cy2+8);
+      ctx.fillText(altFt+'ft',cx2+8,cy2+8);
+
+      // Badge source (awacs/both)
+      if(c.source==='awacs'||c.source==='both'){
+        ctx.fillStyle=c.source==='both'?'#ffb830':'#40c8ff';
+        ctx.font='8px Share Tech Mono';
+        ctx.fillText(c.source.toUpperCase(),cx2+8,cy2+18);
+      }
     });
 
+    // Propria aeronave
     const hdgRad=(selfData.heading_deg||0)*Math.PI/180;
     ctx.save();ctx.translate(CX,CY);ctx.rotate(hdgRad);
     ctx.fillStyle='#40c8ff';ctx.strokeStyle='#40c8ff';ctx.lineWidth=1.5;
@@ -634,6 +693,7 @@ function draw(){
 
   ctx.restore();
 
+  // Borda do radar
   ctx.strokeStyle='rgba(57,255,110,0.2)';ctx.lineWidth=1.5;
   ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.stroke();
 }
@@ -652,11 +712,14 @@ function updateSidebar(){
   if(!n){list.innerHTML='<div style="color:var(--muted);font-size:11px;padding:8px 0;text-align:center">No contacts</div>';return;}
   const sorted=[...contacts].sort((a,b)=>a.dist_m-b.dist_m);
   list.innerHTML=sorted.map(c=>{
-    const color=iffColor(c.coalition);
+    const style=sourceStyle(c);
+    const dotStyle=style.shape==='circle-outline'
+      ?`background:transparent;border:2px solid ${style.stroke}`
+      :`background:${style.fill!=='transparent'?style.fill:style.stroke}`;
     const dist=c.dist_m>=1000?(c.dist_m/1000).toFixed(1)+'km':Math.round(c.dist_m)+'m';
     const alt=Math.round((c.alt_msl_m||0)*3.28084/100)*100;
     return`<div class="contact-row${c.id===selectedId?' selected':''}" onclick="selectContact('${c.id}')">
-      <div class="iff-dot" style="background:${color}"></div>
+      <div class="iff-dot" style="${dotStyle}"></div>
       <div class="contact-name">${c.name||c.id}</div>
       <div class="contact-dist">${dist}</div>
       <div class="contact-alt">${alt}ft</div>
@@ -669,21 +732,32 @@ function selectContact(id){
   const c=contacts.find(x=>x.id===id);
   const panel=document.getElementById('detail-panel');
   if(c&&selectedId){
-    const color=iffColor(c.coalition);
+    const style=sourceStyle(c);
+    const color=style.stroke;
     const dist=c.dist_m>=1000?(c.dist_m/1000).toFixed(1)+' km':Math.round(c.dist_m)+' m';
+    const srcLabel=c.source==='awacs'?'AWACS only':c.source==='both'?'Search + AWACS':'Search';
     panel.className='show';
     panel.innerHTML=`
       <div style="font-family:var(--hud);font-size:11px;color:${color};margin-bottom:8px">${(c.name||c.id).toUpperCase()}</div>
       <div class="kv"><span class="kv-label">Type</span><span class="kv-value" style="font-size:11px">${c.type||'—'}</span></div>
+      <div class="kv"><span class="kv-label">Source</span><span class="kv-value" style="font-size:11px;color:${color}">${srcLabel}</span></div>
       <div class="kv"><span class="kv-label">Distance</span><span class="kv-value" style="font-size:11px">${dist}</span></div>
       <div class="kv"><span class="kv-label">Altitude</span><span class="kv-value" style="font-size:11px">${Math.round((c.alt_msl_m||0)*3.28084).toLocaleString()} ft</span></div>
       <div class="kv"><span class="kv-label">Heading</span><span class="kv-value" style="font-size:11px">${Math.round(c.heading_deg||0)}°</span></div>
       <div class="kv"><span class="kv-label">Speed</span><span class="kv-value" style="font-size:11px">${Math.round((c.speed_ms||0)*1.944)} kts</span></div>
-      <div class="kv"><span class="kv-label">Coalition</span><span class="kv-value" style="font-size:11px;color:${color}">${c.coalition===1?'FRIENDLY':c.coalition===2?'ENEMY':'NEUTRAL'}</span></div>`;
+      <div class="kv"><span class="kv-label">Coalition</span><span class="kv-value" style="font-size:11px;color:${iffColor(c.coalition)}">${c.coalition===1?'FRIENDLY':c.coalition===2?'ENEMY':'NEUTRAL'}</span></div>
+      ${c.awacs_visible!==undefined?'<div class="kv"><span class="kv-label">AWACS Visible</span><span class="kv-value" style="font-size:11px">'+(c.awacs_visible?'YES':'NO')+'</span></div>':''}
+      ${c.awacs_type_known!==undefined?'<div class="kv"><span class="kv-label">Type Known</span><span class="kv-value" style="font-size:11px">'+(c.awacs_type_known?'YES':'NO')+'</span></div>':''}`;
   } else {
     panel.className='';panel.innerHTML='';
   }
   updateSidebar();draw();
+}
+
+function iffColor(coal){
+  if(coal===1)return'#39ff6e';
+  if(coal===2)return'#ff4040';
+  return'#ffb830';
 }
 
 function setWsStatus(s){
