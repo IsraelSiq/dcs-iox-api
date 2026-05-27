@@ -2,46 +2,26 @@
 -- dcs-iox-api | MissionScript.lua  (DCS 2.9+)
 --
 -- Roda DENTRO da missão via trigger "DO SCRIPT FILE".
--- Envia contacts diretamente ao servidor Python via UDP 7779.
--- NÃO depende de net.dostring_in (não compartilha estado Lua).
+-- Escreve contacts em arquivo temporário que o Export.lua lê.
+-- Essa é a única forma confiável de passar dados do Mission
+-- environment para o Export environment no DCS 2.9+.
 --
 -- INSTALAÇÃO:
 --   1. No Mission Editor, crie um trigger:
 --        Type      : ONCE
 --        Condition : TIME MORE (1)
 --        Action    : DO SCRIPT FILE -> selecione este arquivo
---   2. Salve a missão e vá para o DCS Saved Games:
---        %USERPROFILE%\Saved Games\DCS\Scripts\
---        Certifique-se que o Export.lua também está lá.
---   3. Inicie a missão — o servidor Python já deve estar rodando.
+--   2. Salve a missão.
 -- =============================================================
 
 local IOXM = {}
 IOXM.update_interval = 1.0        -- contacts a 1 Hz
 IOXM.radar_range_m   = 150000     -- 150 km
-IOXM.host            = "127.0.0.1"
-IOXM.port            = 7779
-IOXM.socket          = nil
 
--- ----------------------------------------------------------------
--- Abre socket UDP (luasocket disponível no Mission env do DCS)
--- ----------------------------------------------------------------
-local function open_socket()
-  local ok, socket_lib = pcall(require, "socket")
-  if not ok then
-    env.info("[IOX-Mission] ERRO: luasocket não disponível: " .. tostring(socket_lib))
-    return false
-  end
-  local sock, err = socket_lib.udp()
-  if not sock then
-    env.info("[IOX-Mission] ERRO ao criar socket UDP: " .. tostring(err))
-    return false
-  end
-  sock:setpeername(IOXM.host, IOXM.port)
-  IOXM.socket = sock
-  env.info("[IOX-Mission] Socket UDP aberto -> " .. IOXM.host .. ":" .. IOXM.port)
-  return true
-end
+-- Arquivo temporário na pasta Scripts do DCS (acessível por ambos os envs)
+IOXM.contacts_file = lfs.writedir() .. "Scripts\\iox_contacts.json"
+
+env.info("[IOX-Mission] Arquivo de contacts: " .. IOXM.contacts_file)
 
 -- ----------------------------------------------------------------
 -- Helpers JSON mínimos
@@ -111,7 +91,7 @@ local function get_player_unit()
 end
 
 -- ----------------------------------------------------------------
--- Coleta contacts usando world.searchObjects (disponível aqui)
+-- Coleta contacts usando world.searchObjects
 -- ----------------------------------------------------------------
 local function collect_contacts(player_unit)
   local contacts  = {}
@@ -184,14 +164,9 @@ local function collect_contacts(player_unit)
 end
 
 -- ----------------------------------------------------------------
--- Tick: coleta contacts e envia via UDP direto ao servidor Python
+-- Tick: coleta contacts e escreve no arquivo temporário
 -- ----------------------------------------------------------------
 local function ioxm_tick()
-  -- Garante socket aberto
-  if not IOXM.socket then
-    if not open_socket() then return end
-  end
-
   local player = get_player_unit()
   if not player then
     env.info("[IOX-Mission] aguardando player...")
@@ -204,21 +179,22 @@ local function ioxm_tick()
     return
   end
 
-  local t         = timer.getTime()
-  local payload   = string.format(
-    '{"type":"contacts","ts":%.3f,"contacts":%s}',
+  local t       = timer.getTime()
+  local payload = string.format(
+    '{"ts":%.3f,"contacts":%s}',
     t, json_array(contacts)
   )
 
-  -- Envia UDP diretamente ao servidor Python (porta 7779)
-  local sent, err = IOXM.socket:send(payload)
-  if not sent then
-    env.info("[IOX-Mission] ERRO ao enviar UDP: " .. tostring(err))
-    IOXM.socket = nil  -- força reabertura no próximo tick
-  else
-    env.info(string.format("[IOX-Mission] %d contact(s) -> UDP %s:%d",
-      #contacts, IOXM.host, IOXM.port))
+  -- Escreve no arquivo (io.open está disponível no Mission environment)
+  local f, err = io.open(IOXM.contacts_file, "w")
+  if not f then
+    env.info("[IOX-Mission] ERRO ao abrir arquivo: " .. tostring(err))
+    return
   end
+  f:write(payload)
+  f:close()
+
+  env.info(string.format("[IOX-Mission] %d contact(s) -> arquivo", #contacts))
 end
 
 -- ----------------------------------------------------------------
@@ -230,6 +206,6 @@ local function schedule_tick(_, time)
   return time + IOXM.update_interval
 end
 
-env.info("[IOX-Mission] Inicializando (UDP direto -> " .. IOXM.host .. ":" .. IOXM.port .. ")...")
+env.info("[IOX-Mission] Inicializando (file bridge -> " .. IOXM.contacts_file .. ")...")
 timer.scheduleFunction(schedule_tick, nil, timer.getTime() + 1)
 env.info("[IOX-Mission] Scheduler iniciado. Contacts a cada " .. IOXM.update_interval .. "s")
