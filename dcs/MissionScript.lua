@@ -2,20 +2,46 @@
 -- dcs-iox-api | MissionScript.lua  (DCS 2.9+)
 --
 -- Roda DENTRO da missão via trigger "DO SCRIPT FILE".
--- NÃO usa luasocket (indisponível no Mission environment).
--- Passa contacts para o Export environment via net.dostring_in.
+-- Envia contacts diretamente ao servidor Python via UDP 7779.
+-- NÃO depende de net.dostring_in (não compartilha estado Lua).
 --
 -- INSTALAÇÃO:
 --   1. No Mission Editor, crie um trigger:
 --        Type      : ONCE
 --        Condition : TIME MORE (1)
 --        Action    : DO SCRIPT FILE -> selecione este arquivo
---   2. Salve a missão.
+--   2. Salve a missão e vá para o DCS Saved Games:
+--        %USERPROFILE%\Saved Games\DCS\Scripts\
+--        Certifique-se que o Export.lua também está lá.
+--   3. Inicie a missão — o servidor Python já deve estar rodando.
 -- =============================================================
 
 local IOXM = {}
 IOXM.update_interval = 1.0        -- contacts a 1 Hz
 IOXM.radar_range_m   = 150000     -- 150 km
+IOXM.host            = "127.0.0.1"
+IOXM.port            = 7779
+IOXM.socket          = nil
+
+-- ----------------------------------------------------------------
+-- Abre socket UDP (luasocket disponível no Mission env do DCS)
+-- ----------------------------------------------------------------
+local function open_socket()
+  local ok, socket_lib = pcall(require, "socket")
+  if not ok then
+    env.info("[IOX-Mission] ERRO: luasocket não disponível: " .. tostring(socket_lib))
+    return false
+  end
+  local sock, err = socket_lib.udp()
+  if not sock then
+    env.info("[IOX-Mission] ERRO ao criar socket UDP: " .. tostring(err))
+    return false
+  end
+  sock:setpeername(IOXM.host, IOXM.port)
+  IOXM.socket = sock
+  env.info("[IOX-Mission] Socket UDP aberto -> " .. IOXM.host .. ":" .. IOXM.port)
+  return true
+end
 
 -- ----------------------------------------------------------------
 -- Helpers JSON mínimos
@@ -158,9 +184,14 @@ local function collect_contacts(player_unit)
 end
 
 -- ----------------------------------------------------------------
--- Tick: coleta contacts e injeta no Export environment
+-- Tick: coleta contacts e envia via UDP direto ao servidor Python
 -- ----------------------------------------------------------------
 local function ioxm_tick()
+  -- Garante socket aberto
+  if not IOXM.socket then
+    if not open_socket() then return end
+  end
+
   local player = get_player_unit()
   if not player then
     env.info("[IOX-Mission] aguardando player...")
@@ -174,22 +205,19 @@ local function ioxm_tick()
   end
 
   local t         = timer.getTime()
-  local json_body = json_array(contacts)
-
-  -- Escapa a string JSON para embutir como literal Lua
-  -- Usa string.format com %q para escapar aspas e barras
-  local lua_code = string.format(
-    'if IOX then IOX.pending_contacts = %s IOX.pending_contacts_ts = %.3f end',
-    json_body, t
+  local payload   = string.format(
+    '{"type":"contacts","ts":%.3f,"contacts":%s}',
+    t, json_array(contacts)
   )
 
-  -- net.dostring_in executa o código no Export environment
-  -- onde IOX já existe e o socket UDP está aberto
-  local ok2, err = pcall(net.dostring_in, "export", lua_code)
-  if not ok2 then
-    env.info("[IOX-Mission] net.dostring_in falhou: " .. tostring(err))
+  -- Envia UDP diretamente ao servidor Python (porta 7779)
+  local sent, err = IOXM.socket:send(payload)
+  if not sent then
+    env.info("[IOX-Mission] ERRO ao enviar UDP: " .. tostring(err))
+    IOXM.socket = nil  -- força reabertura no próximo tick
   else
-    env.info(string.format("[IOX-Mission] %d contact(s) -> Export env", #contacts))
+    env.info(string.format("[IOX-Mission] %d contact(s) -> UDP %s:%d",
+      #contacts, IOXM.host, IOXM.port))
   end
 end
 
@@ -202,6 +230,6 @@ local function schedule_tick(_, time)
   return time + IOXM.update_interval
 end
 
-env.info("[IOX-Mission] Inicializando (net.dostring_in bridge)...")
+env.info("[IOX-Mission] Inicializando (UDP direto -> " .. IOXM.host .. ":" .. IOXM.port .. ")...")
 timer.scheduleFunction(schedule_tick, nil, timer.getTime() + 1)
 env.info("[IOX-Mission] Scheduler iniciado. Contacts a cada " .. IOXM.update_interval .. "s")
