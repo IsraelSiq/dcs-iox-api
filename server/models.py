@@ -1,16 +1,19 @@
 # server/models.py
 # Issue #5 - Generic aircraft data model
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from pydantic import BaseModel, Field, model_validator
+from typing import Optional, List, Union
 import time
+
+
+COALITION_MAP = {"neutral": 0, "red": 1, "blue": 2}
 
 
 class AircraftState(BaseModel):
     """Player aircraft telemetry state."""
 
     # Meta
-    timestamp:   float = Field(0.0, description="DCS mission time (seconds)")
-    aircraft:    str   = Field("unknown", description="Aircraft module name")
+    timestamp:   float = Field(0.0)
+    aircraft:    str   = Field("unknown")
     received_at: float = Field(default_factory=time.time)
 
     # Position
@@ -33,53 +36,61 @@ class AircraftState(BaseModel):
     aoa_deg:     float = Field(0.0)
 
     # Systems
-    fuel_kg: float = Field(0.0)
-    rpm_1:   float = Field(0.0)
-    rpm_2:   float = Field(0.0)
+    fuel_kg:    float = Field(0.0)
+    rpm_pct:    float = Field(0.0)   # single engine %
+    rpm_1:      float = Field(0.0)
+    rpm_2:      float = Field(0.0)
+    g_load:     float = Field(1.0)
+    throttle:   float = Field(0.0)
+    flaps_pct:  float = Field(0.0)
+    gear_down:  bool  = Field(False)
+    airbrake_pct: float = Field(0.0)
+    engine_fire:  bool  = Field(False)
 
     # Coalition (0=neutral, 1=red, 2=blue)
     coalition: int = Field(2)
 
     class Config:
-        json_schema_extra = {
-            "example": {
-                "timestamp": 125.033,
-                "aircraft": "F-16C_50",
-                "lat": 41.123456,
-                "lon": 42.654321,
-                "alt_msl_m": 3048.0,
-                "alt_agl_m": 2800.0,
-                "speed_ms": 290.0,
-                "ias_ms": 257.2,
-                "tas_ms": 290.4,
-                "mach": 0.87,
-                "vvi_ms": -2.1,
-                "heading_deg": 270.0,
-                "pitch_deg": -1.5,
-                "bank_deg": 0.3,
-                "aoa_deg": 4.2,
-                "fuel_kg": 2450.0,
-                "rpm_1": 88.5,
-                "rpm_2": 0.0,
-                "coalition": 2,
-            }
-        }
+        extra = "allow"   # ignore unknown fields from Export.lua
 
 
 class ContactState(BaseModel):
     """A world contact detected within radar range."""
 
-    id:          str   = Field(..., description="DCS unit ID")
-    name:        str   = Field("", description="Unit name")
-    type:        str   = Field("unknown", description="Aircraft/unit type")
+    id:          str   = Field(...)
+    name:        str   = Field("")
+    type:        str   = Field("unknown")
     lat:         float = Field(0.0)
     lon:         float = Field(0.0)
     alt_msl_m:   float = Field(0.0)
     heading_deg: float = Field(0.0)
     speed_ms:    float = Field(0.0)
-    coalition:   int   = Field(0, description="0=neutral, 1=red, 2=blue")
-    dist_m:      float = Field(0.0, description="Distance from player (metres)")
+    speed_kts:   float = Field(0.0)
+    coalition:   int   = Field(0)   # 0=neutral, 1=red, 2=blue
+    dist_m:      float = Field(0.0)
     received_at: float = Field(default_factory=time.time)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize(cls, data: dict) -> dict:
+        # Accept coalition as string or int
+        coal = data.get("coalition", 0)
+        if isinstance(coal, str):
+            data["coalition"] = COALITION_MAP.get(coal.lower(), 0)
+
+        # Accept 'aircraft' as alias for 'type'
+        if "type" not in data or not data["type"] or data["type"] == "unknown":
+            if "aircraft" in data:
+                data["type"] = data["aircraft"]
+
+        # Accept 'id' as string (convert int IDs from DCS)
+        if "id" in data and not isinstance(data["id"], str):
+            data["id"] = str(data["id"])
+
+        return data
+
+    class Config:
+        extra = "allow"
 
 
 class ContactsPacket(BaseModel):
