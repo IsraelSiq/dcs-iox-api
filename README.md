@@ -1,62 +1,70 @@
 # dcs-iox-api
 
-> Bridge between **DCS World** and the outside world via UDP → REST / WebSocket.
+> Real-time telemetry and tactical radar for **DCS World**, served as a local REST/WebSocket API.
 
-## Arquitetura
-
-O DCS World possui **dois ambientes Lua separados** com APIs diferentes:
-
-| Ambiente | Arquivo | APIs disponíveis |
-|---|---|---|
-| Export environment | `Export.lua` (Saved Games) | `LoGetSelfData`, `LoGetIndicatedAirSpeed`, etc. |
-| Mission environment | `MissionScript.lua` (trigger na missão) | `world.searchObjects`, `Unit`, `coalition`, `coord`, etc. |
-
-`world.searchObjects` **não funciona** no Export environment — por isso contacts e telemetria são enviados em portas UDP separadas:
-
-```
- DCS World
-  ├── Export.lua  (Saved Games\DCS\Scripts)
-  │     └─ player telemetry  ──► UDP :7778  (~30 Hz, JSON)
-  │
-  └── MissionScript.lua  (carregado via trigger DO SCRIPT FILE)
-        └─ contacts         ──► UDP :7779  (~1 Hz, JSON)
-
-                    ┌────────────────────┐
-                    │  UDP Server x2     │  asyncio
-                    │  7778 + 7779       │
-                    └────────┬───────────┘
-                             │  shared in-memory state
-                    ┌────────▼───────────┐
-                    │     FastAPI        │  REST + WebSocket
-                    └────────────────────┘
-                           :8000
-```
+Captures live data from DCS World using the native `Export.lua` hook and `LoGetWorldObjects()`, streams it through a FastAPI server, and renders a tactical radar with sweep animation directly in the browser — no mods, no external tools required.
 
 ---
 
-## Quick start (local)
+## Features
+
+- **Tactical radar** — animated sweep, contact trails, altitude filter, threat alerts
+- **Full unit awareness** — all coalition units (air + ground + naval) via `LoGetWorldObjects()`
+- **Player telemetry** — speed, altitude, heading, G-load, fuel, AoA at ~30 Hz
+- **REST + WebSocket API** — integrate with any overlay, stream deck, or external tool
+- **Single UDP port** — contacts and telemetry in one packet, one listener
+- **Standalone `.exe`** — runs without Python installed, opens browser automatically
+- **Local mock** — test radar and API without DCS running
+
+---
+
+## Architecture
+
+```
+DCS World
+  └── Export.lua  (%USERPROFILE%\Saved Games\DCS\Scripts)
+        ├── LoGetSelfData()        player telemetry
+        └── LoGetWorldObjects()    all units on the map
+              │
+              └──► UDP :7778 (JSON, ~30 Hz)
+                        │
+               ┌────────▼────────┐
+               │   FastAPI       │  asyncio UDP listener
+               │   server/       │  shared in-memory state
+               └────────┬────────┘
+                        │
+               ┌────────▼────────┐
+               │   :8000         │  REST + WebSocket + Radar UI
+               └─────────────────┘
+```
+
+No `MissionScript.lua`. No second port. No file I/O. Just `Export.lua` → UDP → server.
+
+---
+
+## Quick Start
+
+### Option A — Python
 
 ```bash
-# 1. Clone
 git clone https://github.com/IsraelSiq/dcs-iox-api.git
 cd dcs-iox-api
-
-# 2. Virtualenv
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-# 3. Dependências
+python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
-
-# 4. Rodar
-python -m server.main
+python launcher.py
 ```
 
-Abra http://localhost:8000/docs para o Swagger UI.
+### Option B — Standalone `.exe`
 
----
+```bash
+pip install pyinstaller
+python build.py
+# Output: dist/dcs-iox-api.exe
+```
 
-## Quick start (Docker)
+Double-click `dcs-iox-api.exe` — server starts and radar opens in your browser automatically.
+
+### Option C — Docker
 
 ```bash
 docker compose up --build
@@ -64,82 +72,83 @@ docker compose up --build
 
 ---
 
-## Instalação — Export.lua (telemetria do jogador)
+## DCS Setup
 
-1. Copie `dcs/Export.lua` para:
-   ```
-   %USERPROFILE%\Saved Games\DCS\Scripts\Export.lua
-   ```
-   > Se já existir um `Export.lua` (Tacview, SRS, etc.), **não substitua** — adicione o conteúdo ao final do arquivo existente.
+Copy `dcs/Export.lua` to:
 
-2. Inicie o servidor Python antes de entrar em missão.
+```
+%USERPROFILE%\Saved Games\DCS\Scripts\Export.lua
+```
 
----
+> **Already have an Export.lua?** (Tacview, SRS, DCS-BIOS) Don't overwrite it — open the existing file and paste the contents of `dcs/Export.lua` at the end.
 
-## Instalação — MissionScript.lua (contacts)
-
-Este script precisa ser carregado **dentro de cada missão** que você queira usar:
-
-1. Abra a missão no **Mission Editor** do DCS.
-
-2. Vá em **Triggers** (ícone de engrenagem ou menu Mission → Triggers).
-
-3. Crie um novo trigger com:
-   - **Name**: `IOX_Start` (qualquer nome)
-   - **Type**: `ONCE`
-   - **Condition**: `TIME MORE (1)` — dispara 1 segundo após o início da missão
-   - **Action**: `DO SCRIPT FILE` → aponte para `dcs/MissionScript.lua`
-
-4. Salve a missão (`.miz`). O script é embarcado dentro do arquivo `.miz` — **não precisa** estar em nenhuma pasta específica na hora de jogar.
-
-> **Missões prontas (não editáveis):** não é possível injetar o MissionScript. Use apenas missões suas ou que você possa editar.
+That's it. Start the server, then launch DCS. The radar populates as soon as you're in a mission.
 
 ---
 
-## Endpoints
+## Radar
 
-| Método | Path | Descrição |
-|--------|------|-----------|
-| `GET` | `/health` | Status, uptime, contagem de pacotes |
-| `GET` | `/state` | Estado completo da aeronave |
-| `GET` | `/telemetry` | Posição + velocidade + atitude (resumido) |
-| `GET` | `/contacts` | Lista de contatos detectados pelo MissionScript |
-| `WS` | `/ws/telemetry` | Stream telemetria ~30Hz |
-| `WS` | `/ws/contacts` | Stream contacts ~1Hz |
+Open **`http://localhost:8000/radar`** in your browser.
+
+| Feature | Details |
+|---|---|
+| Sweep animation | Rotating scan line at 36°/s with trailing glow |
+| Contact trails | Last 8 positions per unit |
+| Threat alert | Red banner when any enemy unit is within 20 km |
+| Altitude filter | Min/max sliders in feet |
+| Coalition colors | Blue = friendly · Red = enemy · Yellow = neutral |
+| Labels | Unit name · altitude (ft) · speed (kts) |
+| Toggles | Trails · Labels · Speed vectors |
+
+---
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Status, uptime, packet count, DCS connection |
+| `GET` | `/state` | Full aircraft state |
+| `GET` | `/telemetry` | Position + speed + attitude (summary) |
+| `GET` | `/contacts` | All detected units |
+| `GET` | `/radar` | Tactical radar UI |
+| `GET` | `/dashboard` | HUD overlay |
+| `WS` | `/ws/telemetry` | Live telemetry stream ~30 Hz |
+| `WS` | `/ws/contacts` | Live contacts stream |
 | `GET` | `/docs` | Swagger UI |
 
-### Exemplo `/telemetry`
+### `GET /health`
 
 ```json
 {
-  "aircraft": "F-16C_50",
-  "timestamp": 123.45,
-  "position": { "lat": 41.123, "lon": 29.456, "alt_msl_m": 4572.0 },
-  "speed": { "ias_ms": 180.5, "ias_kts": 350.9, "mach": 0.62 },
-  "attitude": { "heading_deg": 270.0, "pitch_deg": 3.5, "bank_deg": -1.2 }
+  "status": "ok",
+  "uptime": 142.3,
+  "packets_received": 4280,
+  "dcs_connected": true,
+  "contacts_count": 7
 }
 ```
 
-### Exemplo `/contacts`
+### `GET /contacts`
 
 ```json
 {
   "timestamp": 145.0,
-  "count": 3,
+  "count": 2,
   "contacts": [
     {
-      "id": "MiG-29 #001",
-      "name": "MiG-29 #001",
-      "type": "MiG-29A",
-      "category": "unit",
-      "lat": 41.200,
-      "lon": 29.800,
-      "alt_msl_m": 6000.0,
-      "heading_deg": 180.0,
-      "speed_ms": 250.0,
-      "speed_kts": 486.0,
-      "coalition": 1,
-      "dist_m": 42000.0
+      "id": "c3",
+      "name": "Hostile-1",
+      "type": "MiG-29",
+      "category": "Air",
+      "coalition": 2,
+      "lat": 41.812,
+      "lon": 41.623,
+      "alt_msl_m": 9000.0,
+      "heading_deg": 185.0,
+      "speed_ms": 280.0,
+      "speed_kts": 544.4,
+      "dist_m": 58000.0,
+      "source": "export"
     }
   ]
 }
@@ -147,47 +156,67 @@ Este script precisa ser carregado **dentro de cada missão** que você queira us
 
 ---
 
-## Estrutura do projeto
+## Local Testing (no DCS required)
+
+```bash
+# Terminal 1 — server
+python -m server.main
+
+# Terminal 2 — mock (simulates 7 units with real movement)
+python tests/mock_dcs.py
+```
+
+Open `http://localhost:8000/radar` — contacts appear with sweep, trails and threat alerts.
+
+---
+
+## Project Structure
 
 ```
 dcs-iox-api/
 ├── dcs/
-│   ├── Export.lua          # Telemetria do jogador (Saved Games)
-│   └── MissionScript.lua   # Contacts (carregado via trigger na missão)
+│   ├── Export.lua          # DCS hook — telemetry + LoGetWorldObjects()
+│   └── README.md           # DCS-specific install notes
 ├── server/
-│   ├── __init__.py
-│   ├── main.py             # Entry point: UDP 7778 + 7779 + FastAPI
-│   ├── api.py              # FastAPI app, REST + WS
-│   ├── models.py           # Pydantic models
-│   └── state.py            # Shared in-memory state
+│   ├── main.py             # UDP listener + FastAPI entry point
+│   ├── api.py              # REST endpoints + WebSocket + radar/dashboard UI
+│   ├── models.py           # Pydantic models (AircraftState, ContactState)
+│   ├── state.py            # Shared in-memory state
+│   └── log_handler.py      # Buffered log handler
 ├── tests/
-│   ├── mock_dcs.py         # Simulador UDP (sem DCS real)
-│   └── test_api.http
+│   └── mock_dcs.py         # UDP mock — simulates DCS output locally
+├── launcher.py             # Entry point: starts server + opens browser
+├── build.py                # PyInstaller build script → dist/dcs-iox-api.exe
 ├── Dockerfile
 ├── docker-compose.yml
-├── requirements.txt
-└── README.md
+└── requirements.txt
 ```
 
 ---
 
-## Variáveis de ambiente
+## Environment Variables
 
-| Variável | Default | Descrição |
-|----------|---------|----------|
-| `UDP_HOST` | `127.0.0.1` | Interface UDP |
-| `UDP_PORT_TELEMETRY` | `7778` | Porta telemetria (Export.lua) |
-| `UDP_PORT_CONTACTS` | `7779` | Porta contacts (MissionScript.lua) |
-| `API_HOST` | `0.0.0.0` | Interface HTTP/WS |
-| `API_PORT` | `8000` | Porta HTTP/WS |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `UDP_HOST` | `127.0.0.1` | UDP bind address |
+| `UDP_PORT_TELEMETRY` | `7778` | Telemetry + contacts port |
 
 ---
 
-## Desenvolvimento
+## Requirements
 
-```bash
-# Testar sem DCS: simula frames a 30Hz
-python tests/mock_dcs.py
+- Python 3.10+
+- DCS World 2.9+ (Open Beta or Stable)
+- Windows (DCS is Windows-only; server runs on any OS)
 
-# VSCode: F5 → "DCS IOX: Full Stack Test"
 ```
+fastapi
+uvicorn[standard]
+pydantic
+```
+
+---
+
+## License
+
+MIT
