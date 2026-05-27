@@ -241,14 +241,12 @@ end
 
 -- ----------------------------------------------------------------
 -- Contacts via world.searchObjects com callback (DCS 2.9+)
--- CORRIGIDO: searchObjects exige callback, nao retorna tabela iteravel
 -- ----------------------------------------------------------------
 local function get_contacts(player_lat, player_lon, player_unit_name)
   local contacts = {}
 
   local categories = { Object.Category.UNIT, Object.Category.STATIC }
 
-  -- Ponto central do jogador no sistema de coordenadas do DCS
   local ok_center, center_lo = pcall(coord.LLtoLO, player_lat, player_lon)
   if not ok_center or not center_lo then return contacts end
 
@@ -261,8 +259,6 @@ local function get_contacts(player_lat, player_lon, player_unit_name)
   }
 
   for _, cat in ipairs(categories) do
-    -- API correta: world.searchObjects(category, volume, callback)
-    -- O callback recebe cada objeto; retornar true continua a busca
     pcall(world.searchObjects, cat, volume, function(obj)
       local ok_name, obj_name = pcall(function() return obj:getName() end)
       if ok_name and obj_name ~= player_unit_name then
@@ -309,7 +305,7 @@ local function get_contacts(player_lat, player_lon, player_unit_name)
           end
         end
       end
-      return true  -- continua iterando
+      return true
     end)
   end
 
@@ -317,21 +313,20 @@ local function get_contacts(player_lat, player_lon, player_unit_name)
 end
 
 -- ----------------------------------------------------------------
--- Loop principal 30 Hz
+-- Loop interno — chamado dentro do pcall principal
 -- ----------------------------------------------------------------
-function LuaExportActivityNextEvent(t)
-  local tNext = t + IOX.update_interval
-  if not IOX.socket then return tNext end
+local function iox_tick(t)
+  if not IOX.socket then return end
 
   local self_payload, sd = get_self_data(t)
-  if not self_payload then return tNext end
+  if not self_payload then return end
 
   local _lat = self_payload._lat
   local _lon = self_payload._lon
   self_payload._lat = nil
   self_payload._lon = nil
 
-  pcall(function() IOX.socket:send(json_flat(self_payload)) end)
+  IOX.socket:send(json_flat(self_payload))
 
   local unit_name = sd and safe_str(sd.UnitName) or ""
   local contacts  = get_contacts(_lat, _lon, unit_name)
@@ -342,7 +337,15 @@ function LuaExportActivityNextEvent(t)
     count     = #contacts,
   })
   local contacts_msg = hdr:sub(1, -2) .. ',"contacts":' .. json_array(contacts) .. "}"
-  pcall(function() IOX.socket:send(contacts_msg) end)
+  IOX.socket:send(contacts_msg)
+end
 
+-- ----------------------------------------------------------------
+-- Loop principal 30 Hz
+-- tNext É SEMPRE retornado — mesmo em caso de erro interno
+-- ----------------------------------------------------------------
+function LuaExportActivityNextEvent(t)
+  local tNext = t + IOX.update_interval
+  pcall(iox_tick, t)
   return tNext
 end
