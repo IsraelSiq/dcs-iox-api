@@ -429,7 +429,7 @@ drawADI(0,0);drawHeadingTape(0);initWS();
 # ----------------------------------------------------------------
 @app.get("/radar", response_class=HTMLResponse, tags=["Radar"], include_in_schema=False)
 async def radar():
-    """PPI Tactical Radar — range configuravel, IFF + source colors, 10Hz WebSocket."""
+    """PPI Tactical Radar — sweep animation, trails, altitude filter, threat alert."""
     html = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -455,6 +455,13 @@ async def radar():
   #ws-dot.live{background:var(--green);box-shadow:var(--glow);animation:blink 2s infinite}
   #ws-dot.err{background:var(--red)}
   @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+  /* Alerta de ameaça */
+  #threat-alert{display:none;position:fixed;top:60px;left:50%;transform:translateX(-50%);
+    background:rgba(255,64,64,.15);border:1px solid var(--red);color:var(--red);
+    font-family:var(--hud);font-size:12px;letter-spacing:.1em;padding:6px 20px;border-radius:4px;
+    z-index:50;animation:threatpulse 1s ease-in-out infinite;pointer-events:none}
+  #threat-alert.show{display:block}
+  @keyframes threatpulse{0%,100%{opacity:1;box-shadow:0 0 8px rgba(255,64,64,.4)}50%{opacity:.6;box-shadow:0 0 20px rgba(255,64,64,.7)}}
   #content{flex:1;display:grid;grid-template-columns:1fr 280px;gap:1px;background:var(--border);min-height:0}
   #radar-wrap{background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;overflow:hidden}
   #radar-canvas{border-radius:50%;cursor:crosshair}
@@ -469,6 +476,7 @@ async def radar():
   .contact-row{display:grid;grid-template-columns:12px 1fr 60px 50px;gap:6px;align-items:center;padding:4px 6px;border-radius:3px;border:1px solid transparent;cursor:pointer;transition:background .15s;font-size:11px;}
   .contact-row:hover{background:rgba(57,255,110,.06);border-color:var(--border)}
   .contact-row.selected{background:rgba(57,255,110,.1);border-color:var(--green-mid)}
+  .contact-row.threat{border-color:rgba(255,64,64,.3)}
   .iff-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
   .contact-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
   .contact-dist{text-align:right;color:var(--muted);font-size:10px}
@@ -483,11 +491,21 @@ async def radar():
   .range-btn.active{border-color:var(--green);color:var(--green);background:rgba(57,255,110,.08)}
   #detail-panel{display:none;background:rgba(57,255,110,.04);border:1px solid var(--green-mid);border-radius:4px;padding:10px 12px;margin-top:8px}
   #detail-panel.show{display:block}
+  /* Altitude filter */
+  .alt-filter{display:flex;flex-direction:column;gap:6px}
+  .alt-filter label{font-size:10px;color:var(--muted)}
+  .alt-filter input[type=range]{width:100%;accent-color:var(--green);height:4px}
+  .alt-filter .alt-vals{display:flex;justify-content:space-between;font-size:10px;color:var(--muted)}
+  /* Toggle checkbox */
+  .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0}
+  .toggle-row label{font-size:11px;color:var(--muted)}
+  .toggle-row input[type=checkbox]{accent-color:var(--green);width:14px;height:14px;cursor:pointer}
 </style>
 </head>
 <body>
+<div id="threat-alert">⚠ THREAT &lt; 20 KM</div>
 <div id="topbar">
-  <div class="logo">DCS IOX<span>RADAR PPI v0.3</span></div>
+  <div class="logo">DCS IOX<span>RADAR PPI v0.4</span></div>
   <div style="display:flex;gap:16px;align-items:center;font-size:11px">
     <span style="color:var(--muted)">RANGE: <span id="range-label" style="color:var(--green)">100 km</span></span>
     <span style="color:var(--muted)">CONTACTS: <span id="contact-count" style="color:var(--green)">0</span></span>
@@ -514,6 +532,21 @@ async def radar():
       </div>
     </div>
     <div class="side-section">
+      <div class="side-title">ALT FILTER</div>
+      <div class="alt-filter">
+        <label>Min: <span id="alt-min-lbl">0</span> ft</label>
+        <input type="range" id="alt-min" min="0" max="50000" step="1000" value="0" oninput="updateAltFilter()">
+        <label>Max: <span id="alt-max-lbl">50000</span> ft</label>
+        <input type="range" id="alt-max" min="0" max="50000" step="1000" value="50000" oninput="updateAltFilter()">
+      </div>
+    </div>
+    <div class="side-section">
+      <div class="side-title">OPTIONS</div>
+      <div class="toggle-row"><label>Show Trails</label><input type="checkbox" id="opt-trails" checked></div>
+      <div class="toggle-row"><label>Show Labels</label><input type="checkbox" id="opt-labels" checked></div>
+      <div class="toggle-row"><label>Show Speed Vec</label><input type="checkbox" id="opt-vectors" checked></div>
+    </div>
+    <div class="side-section">
       <div class="side-title">CONTACTS (<span id="contact-count-2">0</span>)</div>
       <div id="contact-list"></div>
       <div id="detail-panel"></div>
@@ -536,41 +569,87 @@ async def radar():
 </div>
 <script>
 "use strict";
-const canvas=document.getElementById('radar-canvas');
-const ctx=canvas.getContext('2d');
-let radarRange=100000,selfData=null,contacts=[],selectedId=null,ws=null,reconnectTimer=null;
+const canvas = document.getElementById('radar-canvas');
+const ctx    = canvas.getContext('2d');
+
+let radarRange  = 100000;
+let selfData    = null;
+let contacts    = [];
+let selectedId  = null;
+let ws          = null;
+let reconnectTimer = null;
+
+// Altitude filter state (ft)
+let altMinFt = 0, altMaxFt = 50000;
+
+// Contact trails: id -> [{x,y,ts}]
+const trails = {};
+const TRAIL_MAX = 8;
+const TRAIL_TTL = 15000; // ms
+
+// Sweep angle (degrees, 0=North, clockwise)
+let sweepAngle = 0;
+const SWEEP_SPEED = 36; // degrees per second
+let lastSweepTime = performance.now();
+
+// Timestamp of contacts swept (for fade)
+const contactSweepTs = {}; // id -> timestamp of last sweep pass
+
+// Animation loop
+let animFrameId = null;
+function startAnim(){ if(!animFrameId) animFrameId=requestAnimationFrame(animLoop); }
+function animLoop(now){
+  const dt = (now - lastSweepTime) / 1000;
+  lastSweepTime = now;
+  sweepAngle = (sweepAngle + SWEEP_SPEED * dt) % 360;
+
+  // Mark contacts that fall under the sweep beam
+  if(selfData){
+    contacts.forEach(c=>{
+      const brg = bearing(selfData.lat,selfData.lon,c.lat,c.lon);
+      const diff = Math.abs(((brg - sweepAngle + 540) % 360) - 180);
+      if(diff < 3) contactSweepTs[c.id] = now;
+    });
+  }
+
+  draw(now);
+  animFrameId = requestAnimationFrame(animLoop);
+}
 
 function resize(){
-  const wrap=document.getElementById('radar-wrap');
-  const sz=Math.min(wrap.clientWidth,wrap.clientHeight)-40;
-  canvas.width=sz;canvas.height=sz;
-  draw();
+  const wrap = document.getElementById('radar-wrap');
+  const sz   = Math.min(wrap.clientWidth, wrap.clientHeight) - 40;
+  canvas.width  = sz;
+  canvas.height = sz;
 }
-window.addEventListener('resize',resize);
+window.addEventListener('resize', resize);
 
 function setRange(r){
-  radarRange=r;
-  document.getElementById('range-label').textContent=(r/1000)+' km';
-  document.querySelectorAll('.range-btn').forEach(b=>b.classList.toggle('active',parseInt(b.textContent)*1000===r));
-  draw();
+  radarRange = r;
+  document.getElementById('range-label').textContent = (r/1000)+' km';
+  document.querySelectorAll('.range-btn').forEach(b=>b.classList.toggle('active', parseInt(b.textContent)*1000===r));
 }
 
-// Cor base pelo IFF (coalicao)
+function updateAltFilter(){
+  altMinFt = parseInt(document.getElementById('alt-min').value);
+  altMaxFt = parseInt(document.getElementById('alt-max').value);
+  if(altMinFt > altMaxFt){ altMaxFt = altMinFt; document.getElementById('alt-max').value = altMinFt; }
+  document.getElementById('alt-min-lbl').textContent = altMinFt.toLocaleString();
+  document.getElementById('alt-max-lbl').textContent = altMaxFt.toLocaleString();
+}
+
 function iffColor(coal){
-  if(coal===1) return '#39ff6e';  // Friendly — verde
-  if(coal===2) return '#ff4040';  // Enemy    — vermelho
-  return '#ffb830';               // Neutral  — ambar
+  if(coal===1) return '#39ff6e';
+  if(coal===2) return '#ff4040';
+  return '#ffb830';
 }
 
-// Modificador visual pelo source do contato
-// Retorna { fillColor, strokeColor, shape }
-// shape: 'circle' | 'diamond' | 'circle-outline'
 function sourceStyle(c){
   const base = iffColor(c.coalition);
   const src  = c.source || 'search';
-  if(src === 'awacs') return { fill: 'transparent', stroke: '#40c8ff', shape: 'circle-outline' };
-  if(src === 'both')  return { fill: '#ffb830',      stroke: '#ffb830', shape: 'diamond' };
-  return { fill: base, stroke: base, shape: 'circle' };
+  if(src==='awacs') return { fill:'transparent', stroke:'#40c8ff', shape:'circle-outline' };
+  if(src==='both')  return { fill:'#ffb830',     stroke:'#ffb830', shape:'diamond' };
+  return { fill:base, stroke:base, shape:'circle' };
 }
 
 function haversine(lat1,lon1,lat2,lon2){
@@ -583,7 +662,17 @@ function bearing(lat1,lon1,lat2,lon2){
   const dLon=Math.PI/180*(lon2-lon1);
   const y=Math.sin(dLon)*Math.cos(Math.PI/180*lat2);
   const x=Math.cos(Math.PI/180*lat1)*Math.sin(Math.PI/180*lat2)-Math.sin(Math.PI/180*lat1)*Math.cos(Math.PI/180*lat2)*Math.cos(dLon);
-  return(Math.atan2(y,x)*180/Math.PI+360)%360;
+  return (Math.atan2(y,x)*180/Math.PI+360)%360;
+}
+
+function contactToXY(c, CX, CY, R){
+  if(!selfData) return null;
+  const dist = haversine(selfData.lat,selfData.lon,c.lat,c.lon);
+  if(dist > radarRange) return null;
+  const brg  = bearing(selfData.lat,selfData.lon,c.lat,c.lon);
+  const r    = dist/radarRange*R;
+  const rad  = brg*Math.PI/180;
+  return { x: CX+Math.sin(rad)*r, y: CY-Math.cos(rad)*r, dist, brg };
 }
 
 function drawContactShape(cx,cy,style,size,selected){
@@ -591,111 +680,220 @@ function drawContactShape(cx,cy,style,size,selected){
   ctx.strokeStyle = style.stroke;
   ctx.fillStyle   = style.fill;
   ctx.lineWidth   = selected ? 2 : 1.5;
-
-  if(style.shape === 'circle-outline'){
-    ctx.beginPath();ctx.arc(cx,cy,s,0,Math.PI*2);
-    ctx.stroke();
-    // ponto central pequeno para localizar melhor
+  if(style.shape==='circle-outline'){
+    ctx.beginPath();ctx.arc(cx,cy,s,0,Math.PI*2);ctx.stroke();
     ctx.fillStyle=style.stroke;ctx.beginPath();ctx.arc(cx,cy,1.5,0,Math.PI*2);ctx.fill();
-  } else if(style.shape === 'diamond'){
-    ctx.beginPath();
-    ctx.moveTo(cx, cy-s);ctx.lineTo(cx+s,cy);
-    ctx.lineTo(cx, cy+s);ctx.lineTo(cx-s,cy);
-    ctx.closePath();ctx.fill();ctx.stroke();
+  } else if(style.shape==='diamond'){
+    ctx.beginPath();ctx.moveTo(cx,cy-s);ctx.lineTo(cx+s,cy);ctx.lineTo(cx,cy+s);ctx.lineTo(cx-s,cy);ctx.closePath();ctx.fill();ctx.stroke();
   } else {
-    ctx.beginPath();ctx.arc(cx,cy,s,0,Math.PI*2);
-    ctx.fill();
+    ctx.beginPath();ctx.arc(cx,cy,s,0,Math.PI*2);ctx.fill();
     if(selected){ctx.strokeStyle='#ffffff';ctx.lineWidth=1;ctx.stroke();}
   }
 }
 
-function draw(){
+function drawCompassRose(CX, CY, R){
+  // Outer tick marks + cardinal labels
+  ctx.save();
+  ctx.font='11px Orbitron';
+  const cards=[['N',0],['E',90],['S',180],['W',270]];
+  cards.forEach(([d,a])=>{
+    const rad=a*Math.PI/180;
+    const x=CX+Math.sin(rad)*(R-14);
+    const y=CY-Math.cos(rad)*(R-14);
+    ctx.fillStyle='rgba(57,255,110,0.55)';
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(d,x,y);
+  });
+  // Sub-cardinal ticks
+  ctx.strokeStyle='rgba(57,255,110,0.12)';ctx.lineWidth=1;
+  for(let a=0;a<360;a+=10){
+    const rad=a*Math.PI/180;
+    const inner=a%30===0?R-12:R-8;
+    ctx.beginPath();
+    ctx.moveTo(CX+Math.sin(rad)*inner, CY-Math.cos(rad)*inner);
+    ctx.lineTo(CX+Math.sin(rad)*(R-2), CY-Math.cos(rad)*(R-2));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function draw(now){
   const W=canvas.width,H=canvas.height,CX=W/2,CY=H/2,R=W/2-2;
   ctx.clearRect(0,0,W,H);
 
-  // Fundo
+  // Background gradient
   const bgGrad=ctx.createRadialGradient(CX,CY,0,CX,CY,R);
   bgGrad.addColorStop(0,'#061406');bgGrad.addColorStop(1,'#020602');
   ctx.fillStyle=bgGrad;ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.fill();
 
-  // Aneis de distancia
-  ctx.strokeStyle='rgba(57,255,110,0.08)';ctx.lineWidth=1;
+  // Range rings
+  ctx.strokeStyle='rgba(57,255,110,0.07)';ctx.lineWidth=1;
   for(let i=1;i<=4;i++){ctx.beginPath();ctx.arc(CX,CY,R*i/4,0,Math.PI*2);ctx.stroke();}
 
-  // Linhas de azimute
-  ctx.strokeStyle='rgba(57,255,110,0.05)';
-  for(let a=0;a<360;a+=30){const rad=a*Math.PI/180;ctx.beginPath();ctx.moveTo(CX,CY);ctx.lineTo(CX+Math.sin(rad)*R,CY-Math.cos(rad)*R);ctx.stroke();}
+  // Azimuth lines
+  ctx.strokeStyle='rgba(57,255,110,0.04)';
+  for(let a=0;a<360;a+=30){
+    const rad=a*Math.PI/180;ctx.beginPath();ctx.moveTo(CX,CY);ctx.lineTo(CX+Math.sin(rad)*R,CY-Math.cos(rad)*R);ctx.stroke();
+  }
 
-  // Labels de distancia
-  ctx.fillStyle='rgba(57,255,110,0.3)';ctx.font='9px Share Tech Mono';ctx.textAlign='center';
+  // Range labels
+  ctx.fillStyle='rgba(57,255,110,0.25)';ctx.font='9px Share Tech Mono';ctx.textAlign='center';
   for(let i=1;i<=4;i++){const km=Math.round(radarRange/1000*i/4);ctx.fillText(km+'km',CX,CY-R*i/4+3);}
 
-  // Cardiais
-  ctx.fillStyle='rgba(57,255,110,0.5)';ctx.font='11px Orbitron';
-  ['N','E','S','W'].forEach((d,i)=>{const rad=i*90*Math.PI/180;const x=CX+Math.sin(rad)*(R-14);const y=CY-Math.cos(rad)*(R-14);ctx.textAlign='center';ctx.fillText(d,x,y+4);});
+  // Compass rose
+  drawCompassRose(CX, CY, R);
 
+  // Clip to circle
   ctx.save();ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.clip();
+
+  // ── Sweep beam ──────────────────────────────────────────────
+  const sweepRad = sweepAngle * Math.PI / 180;
+  const sweepGrad = ctx.createConicalGradient
+    ? null  // Not standard, use manual approach
+    : null;
+
+  // Draw sweep as a filled arc sector (trailing glow)
+  const SWEEP_ARC = 25 * Math.PI / 180; // 25° wide trailing glow
+  const startRad  = sweepRad - SWEEP_ARC;
+
+  const sweepFill = ctx.createLinearGradient(
+    CX + Math.sin(startRad)*R, CY - Math.cos(startRad)*R,
+    CX + Math.sin(sweepRad)*R, CY - Math.cos(sweepRad)*R
+  );
+  sweepFill.addColorStop(0, 'rgba(57,255,110,0)');
+  sweepFill.addColorStop(1, 'rgba(57,255,110,0.12)');
+  ctx.fillStyle = sweepFill;
+  ctx.beginPath();
+  ctx.moveTo(CX,CY);
+  ctx.arc(CX,CY,R,startRad - Math.PI/2, sweepRad - Math.PI/2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Sweep line (bright leading edge)
+  ctx.strokeStyle='rgba(57,255,110,0.7)';ctx.lineWidth=1.5;
+  ctx.beginPath();
+  ctx.moveTo(CX,CY);
+  ctx.lineTo(CX+Math.sin(sweepRad)*R, CY-Math.cos(sweepRad)*R);
+  ctx.stroke();
+
+  // ── Contacts ────────────────────────────────────────────────
+  const showTrails   = document.getElementById('opt-trails').checked;
+  const showLabels   = document.getElementById('opt-labels').checked;
+  const showVectors  = document.getElementById('opt-vectors').checked;
+  const nowTs        = now || performance.now();
+
+  let threatDetected = false;
 
   if(selfData){
     contacts.forEach(c=>{
-      const dist=haversine(selfData.lat,selfData.lon,c.lat,c.lon);
-      if(dist>radarRange)return;
-      const brg=bearing(selfData.lat,selfData.lon,c.lat,c.lon);
-      const r=dist/radarRange*R;
-      const rad=brg*Math.PI/180;
-      const cx2=CX+Math.sin(rad)*r,cy2=CY-Math.cos(rad)*r;
-      const style=sourceStyle(c);
-      const isSelected=c.id===selectedId;
+      const pos = contactToXY(c, CX, CY, R);
+      if(!pos) return;
+
+      // Altitude filter
+      const altFt = (c.alt_msl_m||0)*3.28084;
+      if(altFt < altMinFt || altFt > altMaxFt) return;
+
+      const style     = sourceStyle(c);
+      const isSelected= c.id === selectedId;
+      const isThreat  = c.coalition === 2 && pos.dist < 20000;
+      if(isThreat) threatDetected = true;
+
+      // Update trail
+      if(!trails[c.id]) trails[c.id]=[];
+      const trail = trails[c.id];
+      const last = trail[trail.length-1];
+      if(!last || Math.hypot(pos.x-last.x, pos.y-last.y) > 2){
+        trail.push({x:pos.x, y:pos.y, ts:nowTs});
+        if(trail.length > TRAIL_MAX) trail.shift();
+      }
+      // Prune old trail points
+      while(trail.length && nowTs-trail[0].ts > TRAIL_TTL) trail.shift();
+
+      // Fade based on sweep pass: bright right after sweep, fades over full rotation (~10s)
+      const sweepAge = nowTs - (contactSweepTs[c.id]||0);
+      const sweepFade = Math.max(0.15, 1 - sweepAge/(360/SWEEP_SPEED*1000));
+
+      // Draw trail
+      if(showTrails && trail.length > 1){
+        for(let i=1;i<trail.length;i++){
+          const alpha = (i/trail.length)*0.4*sweepFade;
+          ctx.strokeStyle = style.stroke;
+          ctx.globalAlpha = alpha;
+          ctx.lineWidth   = 1;
+          ctx.beginPath();
+          ctx.moveTo(trail[i-1].x, trail[i-1].y);
+          ctx.lineTo(trail[i].x,   trail[i].y);
+          ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // Threat ring
+      if(isThreat){
+        ctx.globalAlpha = 0.3 + 0.2*Math.sin(nowTs/300);
+        ctx.strokeStyle='#ff4040';ctx.lineWidth=1;
+        ctx.beginPath();ctx.arc(pos.x,pos.y,14,0,Math.PI*2);ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
 
       // Glow
+      ctx.globalAlpha = sweepFade;
       const glowColor = style.stroke;
-      const glow=ctx.createRadialGradient(cx2,cy2,0,cx2,cy2,isSelected?18:12);
-      glow.addColorStop(0,glowColor+'44');glow.addColorStop(1,'transparent');
-      ctx.fillStyle=glow;ctx.beginPath();ctx.arc(cx2,cy2,isSelected?18:12,0,Math.PI*2);ctx.fill();
+      const glow = ctx.createRadialGradient(pos.x,pos.y,0,pos.x,pos.y,isSelected?18:12);
+      glow.addColorStop(0, glowColor+'55');glow.addColorStop(1,'transparent');
+      ctx.fillStyle=glow;ctx.beginPath();ctx.arc(pos.x,pos.y,isSelected?18:12,0,Math.PI*2);ctx.fill();
 
-      // Forma do contato
-      drawContactShape(cx2,cy2,style,isSelected?5:3,isSelected);
+      // Contact shape
+      drawContactShape(pos.x,pos.y,style,isSelected?5:3,isSelected);
 
-      // Vetor de direcao
-      if(c.speed_ms>2){
+      // Speed vector
+      if(showVectors && c.speed_ms>2){
         const hrad=c.heading_deg*Math.PI/180;
-        ctx.strokeStyle=style.stroke;ctx.lineWidth=1;ctx.globalAlpha=0.6;
-        ctx.beginPath();ctx.moveTo(cx2,cy2);ctx.lineTo(cx2+Math.sin(hrad)*14,cy2-Math.cos(hrad)*14);ctx.stroke();
-        ctx.globalAlpha=1;
+        ctx.strokeStyle=style.stroke;ctx.lineWidth=1;ctx.globalAlpha=0.5*sweepFade;
+        ctx.beginPath();ctx.moveTo(pos.x,pos.y);ctx.lineTo(pos.x+Math.sin(hrad)*14,pos.y-Math.cos(hrad)*14);ctx.stroke();
       }
 
-      // Label nome
-      ctx.fillStyle=isSelected?'#ffffff':style.stroke;
-      ctx.font=(isSelected?'bold ':'')+'10px Share Tech Mono';
-      ctx.textAlign='left';
-      ctx.fillText(c.name||c.id,cx2+8,cy2-4);
+      ctx.globalAlpha = sweepFade;
 
-      // Altitude
-      const altFt=Math.round((c.alt_msl_m||0)*3.28084/100)*100;
-      ctx.fillStyle='rgba(160,208,160,0.5)';ctx.font='9px Share Tech Mono';
-      ctx.fillText(altFt+'ft',cx2+8,cy2+8);
-
-      // Badge source (awacs/both)
-      if(c.source==='awacs'||c.source==='both'){
-        ctx.fillStyle=c.source==='both'?'#ffb830':'#40c8ff';
-        ctx.font='8px Share Tech Mono';
-        ctx.fillText(c.source.toUpperCase(),cx2+8,cy2+18);
+      // Label
+      if(showLabels){
+        const spd = Math.round((c.speed_ms||0)*1.944);
+        ctx.fillStyle = isSelected ? '#ffffff' : style.stroke;
+        ctx.font = (isSelected?'bold ':'')+' 10px Share Tech Mono';
+        ctx.textAlign='left';
+        ctx.fillText((c.name||c.id), pos.x+8, pos.y-4);
+        // Alt + speed on second line
+        const altFtR = Math.round(altFt/100)*100;
+        ctx.fillStyle='rgba(160,208,160,0.45)';ctx.font='9px Share Tech Mono';
+        ctx.fillText(altFtR+'ft '+spd+'kt', pos.x+8, pos.y+7);
       }
+
+      ctx.globalAlpha = 1;
     });
+  }
 
-    // Propria aeronave
+  // ── Own ship ─────────────────────────────────────────────────
+  if(selfData){
     const hdgRad=(selfData.heading_deg||0)*Math.PI/180;
     ctx.save();ctx.translate(CX,CY);ctx.rotate(hdgRad);
     ctx.fillStyle='#40c8ff';ctx.strokeStyle='#40c8ff';ctx.lineWidth=1.5;
     ctx.beginPath();ctx.moveTo(0,-10);ctx.lineTo(-6,6);ctx.lineTo(0,2);ctx.lineTo(6,6);ctx.closePath();ctx.fill();
+    // Heading vector
+    ctx.strokeStyle='rgba(64,200,255,0.4)';ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(0,-10);ctx.lineTo(0,-30);ctx.stroke();
     ctx.restore();
   }
 
   ctx.restore();
 
-  // Borda do radar
+  // Radar border
   ctx.strokeStyle='rgba(57,255,110,0.2)';ctx.lineWidth=1.5;
   ctx.beginPath();ctx.arc(CX,CY,R,0,Math.PI*2);ctx.stroke();
+
+  // Threat alert banner
+  const alert = document.getElementById('threat-alert');
+  if(threatDetected) alert.classList.add('show');
+  else alert.classList.remove('show');
 }
 
 function updateSidebar(){
@@ -718,7 +916,8 @@ function updateSidebar(){
       :`background:${style.fill!=='transparent'?style.fill:style.stroke}`;
     const dist=c.dist_m>=1000?(c.dist_m/1000).toFixed(1)+'km':Math.round(c.dist_m)+'m';
     const alt=Math.round((c.alt_msl_m||0)*3.28084/100)*100;
-    return`<div class="contact-row${c.id===selectedId?' selected':''}" onclick="selectContact('${c.id}')">
+    const isThreat = c.coalition===2 && c.dist_m<20000;
+    return`<div class="contact-row${c.id===selectedId?' selected':''}${isThreat?' threat':''}" onclick="selectContact('${c.id}')">
       <div class="iff-dot" style="${dotStyle}"></div>
       <div class="contact-name">${c.name||c.id}</div>
       <div class="contact-dist">${dist}</div>
@@ -732,8 +931,7 @@ function selectContact(id){
   const c=contacts.find(x=>x.id===id);
   const panel=document.getElementById('detail-panel');
   if(c&&selectedId){
-    const style=sourceStyle(c);
-    const color=style.stroke;
+    const style=sourceStyle(c);const color=style.stroke;
     const dist=c.dist_m>=1000?(c.dist_m/1000).toFixed(1)+' km':Math.round(c.dist_m)+' m';
     const srcLabel=c.source==='awacs'?'AWACS only':c.source==='both'?'Search + AWACS':'Search';
     panel.className='show';
@@ -751,13 +949,7 @@ function selectContact(id){
   } else {
     panel.className='';panel.innerHTML='';
   }
-  updateSidebar();draw();
-}
-
-function iffColor(coal){
-  if(coal===1)return'#39ff6e';
-  if(coal===2)return'#ff4040';
-  return'#ffb830';
+  updateSidebar();
 }
 
 function setWsStatus(s){
@@ -778,15 +970,17 @@ function initWS(){
       const f=JSON.parse(evt.data);
       selfData=f.self;
       contacts=f.contacts||[];
-      contacts.forEach(c=>{if(selfData)c.dist_m=haversine(selfData.lat,selfData.lon,c.lat,c.lon);});
-      draw();updateSidebar();
+      contacts.forEach(c=>{ if(selfData) c.dist_m=haversine(selfData.lat,selfData.lon,c.lat,c.lon); });
+      updateSidebar();
     }catch(e){}
   };
   ws.onerror=()=>{};
   ws.onclose=()=>{setWsStatus('err');reconnectTimer=setTimeout(initWS,3000);};
 }
 
-resize();initWS();
+resize();
+startAnim();
+initWS();
 </script>
 </body></html>"""
     return HTMLResponse(content=html)
