@@ -1,31 +1,32 @@
 -- =============================================================
 -- dcs-iox-api | MissionScript.lua  (DCS 2.9+)
 --
--- Roda DENTRO da missão via trigger "DO SCRIPT FILE".
--- Escreve contacts em arquivo temporário que o Export.lua lê.
--- NÃO usa lfs (indisponível no Mission env) nem luasocket.
+-- Roda DENTRO da miss\195\163o via trigger "DO SCRIPT FILE".
+-- Envia contacts via UDP para o servidor Python na porta 7779.
 --
--- INSTALAÇÃO:
+-- INSTALA\195\135\195\131O:
 --   1. No Mission Editor, crie um trigger:
 --        Type      : ONCE
 --        Condition : TIME MORE (1)
 --        Action    : DO SCRIPT FILE -> selecione este arquivo
---   2. Salve a missão.
+--   2. Salve a miss\195\163o.
 -- =============================================================
 
 local IOXM = {}
 IOXM.update_interval = 1.0
 IOXM.radar_range_m   = 150000
+IOXM.host            = "127.0.0.1"
+IOXM.port            = 7779
 
--- Descobre o caminho da pasta Scripts do DCS sem usar lfs
--- os.getenv funciona no Mission environment
-local userprofile = os.getenv("USERPROFILE") or "C:\\Users\\user"
-IOXM.contacts_file = userprofile .. "\\Saved Games\\DCS\\Scripts\\iox_contacts.json"
+-- Carrega luasocket (dispon\195\173vel no DCS Mission environment)
+local socket = require("socket")
+local udp    = socket.udp()
+udp:settimeout(0)
 
-env.info("[IOX-Mission] Inicializando (file bridge -> " .. IOXM.contacts_file .. ")...")
+env.info(string.format("[IOX-Mission] Inicializando UDP -> %s:%d", IOXM.host, IOXM.port))
 
 -- ----------------------------------------------------------------
--- Helpers JSON mínimos
+-- Helpers JSON m\195\173nimos
 -- ----------------------------------------------------------------
 local function safe_num(v)
   if type(v) == "number" and v == v then return v else return 0 end
@@ -165,7 +166,23 @@ local function collect_contacts(player_unit)
 end
 
 -- ----------------------------------------------------------------
--- Tick: coleta contacts e escreve no arquivo temporário
+-- Envia payload UDP (fragmenta se > 8kb)
+-- ----------------------------------------------------------------
+local MAX_UDP = 8000
+
+local function udp_send(payload)
+  if #payload <= MAX_UDP then
+    udp:sendto(payload, IOXM.host, IOXM.port)
+    return
+  end
+  -- payload grande: envia s\195\179 os primeiros MAX_UDP bytes com contacts truncados
+  -- (raro em pr\195\161tica; 150km raramente tem > 100 unidades)
+  env.info("[IOX-Mission] payload grande (" .. #payload .. "b), truncando")
+  udp:sendto(payload:sub(1, MAX_UDP), IOXM.host, IOXM.port)
+end
+
+-- ----------------------------------------------------------------
+-- Tick: coleta contacts e envia via UDP
 -- ----------------------------------------------------------------
 local function ioxm_tick()
   local player = get_player_unit()
@@ -182,19 +199,12 @@ local function ioxm_tick()
 
   local t       = timer.getTime()
   local payload = string.format(
-    '{"ts":%.3f,"contacts":%s}',
+    '{"timestamp":%.3f,"contacts":%s}',
     t, json_array(contacts)
   )
 
-  local f, err = io.open(IOXM.contacts_file, "w")
-  if not f then
-    env.info("[IOX-Mission] ERRO ao abrir arquivo: " .. tostring(err))
-    return
-  end
-  f:write(payload)
-  f:close()
-
-  env.info(string.format("[IOX-Mission] %d contact(s) -> arquivo", #contacts))
+  udp_send(payload)
+  env.info(string.format("[IOX-Mission] %d contact(s) -> UDP %s:%d", #contacts, IOXM.host, IOXM.port))
 end
 
 -- ----------------------------------------------------------------
@@ -207,4 +217,4 @@ local function schedule_tick(_, time)
 end
 
 timer.scheduleFunction(schedule_tick, nil, timer.getTime() + 1)
-env.info("[IOX-Mission] Scheduler iniciado. Contacts a cada " .. IOXM.update_interval .. "s")
+env.info("[IOX-Mission] Scheduler iniciado. Contacts a cada " .. IOXM.update_interval .. "s via UDP")
