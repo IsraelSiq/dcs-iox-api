@@ -22,3 +22,7 @@ packet_count: int = 0
 
 # Rolling log buffer (last 200 entries)
 log_buffer: deque = deque(maxlen=200)
+
+# Contacts log: cada entrada é um batch completo recebido
+# Cada entry: { "received_at": str, "ts": float, "count": int, "contacts": [...] }
+contacts_log: deque = deque(maxlen=500)

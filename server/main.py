@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import datetime
 import uvicorn
 
 from server.log_handler import BufferHandler
@@ -48,7 +49,6 @@ class TelemetryProtocol(asyncio.DatagramProtocol):
             return
 
         payload.pop("msg_type", None)
-        # Legacy packets may carry embedded contacts — handle gracefully
         raw_contacts = payload.pop("contacts", [])
         if raw_contacts:
             _ingest_contacts(raw_contacts, time.time())
@@ -74,10 +74,12 @@ class ContactsProtocol(asyncio.DatagramProtocol):
         try:
             payload = json.loads(data.decode("utf-8", errors="replace"))
         except json.JSONDecodeError:
+            log.warning(f"[contacts] JSON invalido recebido de {addr}: {data[:80]}")
             return
 
         raw_contacts = payload.get("contacts", [])
         ts           = payload.get("timestamp", time.time())
+        log.info(f"[contacts] UDP recebido de {addr}: {len(raw_contacts)} contato(s), ts={ts:.1f}")
         _ingest_contacts(raw_contacts, ts)
 
     def error_received(self, exc):
@@ -93,10 +95,36 @@ def _ingest_contacts(raw_contacts: list, timestamp: float):
         try:
             contact = ContactState(**c)
             new_contacts[contact.id] = contact
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"[contacts] falha ao parsear contato: {e} | dados: {c}")
+
     shared.contacts           = new_contacts
     shared.contacts_timestamp = timestamp
+
+    # Salva no log de contatos
+    entry = {
+        "received_at": datetime.datetime.now().strftime("%H:%M:%S"),
+        "ts": round(timestamp, 2),
+        "count": len(new_contacts),
+        "contacts": [
+            {
+                "id":          c.id,
+                "name":        c.name,
+                "type":        c.type,
+                "category":    c.category,
+                "coalition":   c.coalition,
+                "lat":         round(c.lat, 5),
+                "lon":         round(c.lon, 5),
+                "alt_msl_m":   round(c.alt_msl_m, 1),
+                "heading_deg": round(c.heading_deg, 1),
+                "speed_ms":    round(c.speed_ms, 1),
+                "speed_kts":   round(c.speed_kts, 1),
+                "dist_m":      round(c.dist_m, 0),
+            }
+            for c in new_contacts.values()
+        ],
+    }
+    shared.contacts_log.append(entry)
     log.debug(f"[contacts] ingested {len(new_contacts)} contact(s)")
 
 
@@ -107,13 +135,11 @@ async def main():
     shared.start_time = time.time()
     loop = asyncio.get_running_loop()
 
-    # UDP: player telemetry
     transport_telemetry, _ = await loop.create_datagram_endpoint(
         TelemetryProtocol,
         local_addr=(UDP_HOST, UDP_PORT_TELEMETRY),
     )
 
-    # UDP: contacts from MissionScript
     transport_contacts, _ = await loop.create_datagram_endpoint(
         ContactsProtocol,
         local_addr=(UDP_HOST, UDP_PORT_CONTACTS),
