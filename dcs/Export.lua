@@ -70,20 +70,14 @@ end
 
 -- ----------------------------------------------------------------
 -- Carrega luasocket pelo caminho interno do DCS
--- O DCS nao expoe 'socket' no require() padrao do Export context.
--- Precisamos adicionar o caminho das DLLs internas ao package.path/cpath.
 -- ----------------------------------------------------------------
 local function load_socket()
-  -- Tenta o require direto primeiro (funciona em alguns setups)
   local ok, sock = pcall(require, "socket")
   if ok and sock then return sock end
 
-  -- Adiciona caminhos internos do DCS ao package.cpath
   local dcs_paths = {
-    -- DCS instala luasocket aqui (Steam e standalone)
     "./Scripts/?.dll",
     "./bin/?.dll",
-    -- Caminhos absolutos comuns
     "C:/Program Files/Eagle Dynamics/DCS World/bin/?.dll",
     "C:/Program Files/Eagle Dynamics/DCS World OpenBeta/bin/?.dll",
     "C:/Program Files (x86)/Steam/steamapps/common/DCSWorld/bin/?.dll",
@@ -92,14 +86,11 @@ local function load_socket()
     package.cpath = package.cpath .. ";" .. p
   end
 
-  -- Tenta novamente apos adicionar os caminhos
   ok, sock = pcall(require, "socket")
   if ok and sock then return sock end
 
-  -- Ultima tentativa: socket.core direto
   ok, sock = pcall(require, "socket.core")
   if ok and sock then
-    -- Monta interface minima de UDP
     local M = {}
     function M.udp()
       local u = sock.udp()
@@ -120,7 +111,6 @@ function LuaExportStart()
   if not sock_lib then
     log.write("IOX", log.ERROR,
       "[dcs-iox-api] luasocket nao encontrado! "
-      .. "Verifique se o DCS esta instalado corretamente. "
       .. "package.cpath: " .. tostring(package.cpath))
     return
   end
@@ -250,71 +240,77 @@ local function get_self_data(t)
 end
 
 -- ----------------------------------------------------------------
--- Contacts via world.searchObjects (DCS 2.9+)
+-- Contacts via world.searchObjects com callback (DCS 2.9+)
+-- CORRIGIDO: searchObjects exige callback, nao retorna tabela iteravel
 -- ----------------------------------------------------------------
 local function get_contacts(player_lat, player_lon, player_unit_name)
   local contacts = {}
 
   local categories = { Object.Category.UNIT, Object.Category.STATIC }
 
+  -- Ponto central do jogador no sistema de coordenadas do DCS
+  local ok_center, center_lo = pcall(coord.LLtoLO, player_lat, player_lon)
+  if not ok_center or not center_lo then return contacts end
+
+  local volume = {
+    id     = world.VolumeType.SPHERE,
+    params = {
+      point  = center_lo,
+      radius = IOX.radar_range_m,
+    },
+  }
+
   for _, cat in ipairs(categories) do
-    local ok, objects = pcall(world.searchObjects, cat, {
-      id     = world.VolumeType.SPHERE,
-      params = {
-        point  = coord.LLtoLO(player_lat, player_lon),
-        radius = IOX.radar_range_m,
-      },
-    })
+    -- API correta: world.searchObjects(category, volume, callback)
+    -- O callback recebe cada objeto; retornar true continua a busca
+    pcall(world.searchObjects, cat, volume, function(obj)
+      local ok_name, obj_name = pcall(function() return obj:getName() end)
+      if ok_name and obj_name ~= player_unit_name then
+        local ok_pos, pos3 = pcall(function() return obj:getPoint() end)
+        if ok_pos and pos3 then
+          local ok_lla, lla = pcall(coord.LOtoLL, pos3)
+          if ok_lla and lla then
+            local c_lat = safe_num(lla.latitude  or lla.Lat  or 0)
+            local c_lon = safe_num(lla.longitude or lla.Long or 0)
+            local c_alt = safe_num(lla.altitude  or lla.Alt  or pos3.y or 0)
+            local dist  = haversine(player_lat, player_lon, c_lat, c_lon)
 
-    if ok and objects then
-      for _, obj in ipairs(objects) do
-        local ok2, obj_name = pcall(function() return obj:getName() end)
-        if ok2 and obj_name ~= player_unit_name then
-          local ok3, pos3 = pcall(function() return obj:getPoint() end)
-          if ok3 and pos3 then
-            local ok4, lla = pcall(coord.LOtoLL, pos3)
-            if ok4 and lla then
-              local c_lat = safe_num(lla.latitude  or lla.Lat  or 0)
-              local c_lon = safe_num(lla.longitude or lla.Long or 0)
-              local c_alt = safe_num(lla.altitude  or lla.Alt  or pos3.y or 0)
-              local dist  = haversine(player_lat, player_lon, c_lat, c_lon)
-
-              local c_hdg, c_spd = 0, 0
-              local ok5, vel = pcall(function() return obj:getVelocity() end)
-              if ok5 and vel then
-                c_spd = math.sqrt(safe_num(vel.x)^2 + safe_num(vel.y)^2 + safe_num(vel.z)^2)
-                if c_spd > 1 then
-                  c_hdg = math.deg(math.atan2(vel.x, vel.z))
-                  if c_hdg < 0 then c_hdg = c_hdg + 360 end
-                end
+            local c_hdg, c_spd = 0, 0
+            local ok_vel, vel = pcall(function() return obj:getVelocity() end)
+            if ok_vel and vel then
+              c_spd = math.sqrt(safe_num(vel.x)^2 + safe_num(vel.y)^2 + safe_num(vel.z)^2)
+              if c_spd > 1 then
+                c_hdg = math.deg(math.atan2(vel.x, vel.z))
+                if c_hdg < 0 then c_hdg = c_hdg + 360 end
               end
-
-              local c_coal = 0
-              local ok6, coal = pcall(function() return obj:getCoalition() end)
-              if ok6 and coal then c_coal = coal end
-
-              local c_type = "unknown"
-              local ok7, desc = pcall(function() return obj:getDesc() end)
-              if ok7 and desc and desc.typeName then c_type = safe_str(desc.typeName) end
-
-              table.insert(contacts, {
-                id          = tostring(ok2 and obj_name or dist),
-                name        = safe_str(ok2 and obj_name or ""),
-                type        = c_type,
-                lat         = c_lat,
-                lon         = c_lon,
-                alt_msl_m   = c_alt,
-                heading_deg = c_hdg,
-                speed_ms    = c_spd,
-                speed_kts   = c_spd * 1.944,
-                coalition   = c_coal,
-                dist_m      = dist,
-              })
             end
+
+            local c_coal = 0
+            local ok_coal, coal = pcall(function() return obj:getCoalition() end)
+            if ok_coal and coal then c_coal = coal end
+
+            local c_type = "unknown"
+            local ok_desc, desc = pcall(function() return obj:getDesc() end)
+            if ok_desc and desc and desc.typeName then c_type = safe_str(desc.typeName) end
+
+            table.insert(contacts, {
+              id          = safe_str(ok_name and obj_name or tostring(dist)),
+              name        = safe_str(ok_name and obj_name or ""),
+              type        = c_type,
+              lat         = c_lat,
+              lon         = c_lon,
+              alt_msl_m   = c_alt,
+              heading_deg = c_hdg,
+              speed_ms    = c_spd,
+              speed_kts   = c_spd * 1.944,
+              coalition   = c_coal,
+              dist_m      = dist,
+            })
           end
         end
       end
-    end
+      return true  -- continua iterando
+    end)
   end
 
   return contacts
