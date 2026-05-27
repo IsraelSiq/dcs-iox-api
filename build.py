@@ -1,19 +1,28 @@
-# build.py — gera dist/dcs-iox-api.exe via PyInstaller
+# build.py
+# Gera dist/dcs-iox-api.exe via PyInstaller.
 # Uso: python build.py
 #
 # Pre-requisito: pip install pyinstaller
-# Output:        dist/dcs-iox-api.exe  (~60-90 MB)
+# Output:        dist/dcs-iox-api.exe
 import subprocess
 import sys
+import os
+
+EXE_NAME = "dcs-iox-api"
+
+# Inclui icone se existir em assets/icon.ico
+icon_args = []
+if os.path.exists("assets/icon.ico"):
+    icon_args = ["--icon", "assets/icon.ico"]
 
 cmd = [
     sys.executable, "-m", "PyInstaller",
-    "--onefile",                          # tudo em um unico .exe
-    "--name", "dcs-iox-api",
-    "--console",                          # janela de terminal (logs visiveis)
-    # Inclui o pacote server inteiro
+    "--onefile",
+    "--name", EXE_NAME,
+    "--console",                          # mostra janela de terminal com os logs
+    # Pacote server
     "--add-data", "server;server",
-    # Coleta modulos que o uvicorn/fastapi carregam dinamicamente
+    # Coleta modulos dinamicos
     "--collect-all", "uvicorn",
     "--collect-all", "fastapi",
     "--collect-all", "starlette",
@@ -23,7 +32,7 @@ cmd = [
     "--collect-all", "h11",
     "--collect-all", "httptools",
     "--collect-all", "websockets",
-    # Imports ocultos comuns com uvicorn[standard]
+    # Hidden imports uvicorn
     "--hidden-import", "uvicorn.logging",
     "--hidden-import", "uvicorn.loops",
     "--hidden-import", "uvicorn.loops.asyncio",
@@ -34,23 +43,28 @@ cmd = [
     "--hidden-import", "uvicorn.protocols.websockets.websockets_impl",
     "--hidden-import", "uvicorn.lifespan",
     "--hidden-import", "uvicorn.lifespan.on",
+    # Stdlib
     "--hidden-import", "email.mime.text",
     "--hidden-import", "email.mime.multipart",
     "--hidden-import", "logging.handlers",
     "--hidden-import", "asyncio",
-    "--noconfirm",                        # sobrescreve build anterior sem perguntar
-    "--clean",                            # limpa cache antes de buildar
-    "launcher.py",                        # entry point
+    "--hidden-import", "webbrowser",
+    "--hidden-import", "threading",
+    "--hidden-import", "urllib.request",
+    *icon_args,
+    "--noconfirm",
+    "--clean",
+    "launcher.py",
 ]
 
-print("[build] Rodando PyInstaller...")
+print(f"[build] Gerando {EXE_NAME}.exe...")
 print("[build] Isso pode demorar 1-3 minutos na primeira vez.\n")
 
 result = subprocess.run(cmd)
 
 if result.returncode == 0:
-    print("\n[build] ✅ Sucesso! Executavel em: dist/dcs-iox-api.exe")
-    print("[build] Para rodar: .\\dist\\dcs-iox-api.exe")
+    print(f"\n[build] Sucesso! Executavel em: dist/{EXE_NAME}.exe")
+    print(f"[build] Para rodar: .\\dist\\{EXE_NAME}.exe")
 else:
-    print("\n[build] ❌ Falhou. Veja o log acima.")
+    print("\n[build] Falhou. Veja o log acima.")
     sys.exit(1)
