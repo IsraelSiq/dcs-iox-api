@@ -3,8 +3,7 @@
 --
 -- Roda DENTRO da missão via trigger "DO SCRIPT FILE".
 -- Escreve contacts em arquivo temporário que o Export.lua lê.
--- Essa é a única forma confiável de passar dados do Mission
--- environment para o Export environment no DCS 2.9+.
+-- NÃO usa lfs (indisponível no Mission env) nem luasocket.
 --
 -- INSTALAÇÃO:
 --   1. No Mission Editor, crie um trigger:
@@ -15,13 +14,15 @@
 -- =============================================================
 
 local IOXM = {}
-IOXM.update_interval = 1.0        -- contacts a 1 Hz
-IOXM.radar_range_m   = 150000     -- 150 km
+IOXM.update_interval = 1.0
+IOXM.radar_range_m   = 150000
 
--- Arquivo temporário na pasta Scripts do DCS (acessível por ambos os envs)
-IOXM.contacts_file = lfs.writedir() .. "Scripts\\iox_contacts.json"
+-- Descobre o caminho da pasta Scripts do DCS sem usar lfs
+-- os.getenv funciona no Mission environment
+local userprofile = os.getenv("USERPROFILE") or "C:\\Users\\user"
+IOXM.contacts_file = userprofile .. "\\Saved Games\\DCS\\Scripts\\iox_contacts.json"
 
-env.info("[IOX-Mission] Arquivo de contacts: " .. IOXM.contacts_file)
+env.info("[IOX-Mission] Inicializando (file bridge -> " .. IOXM.contacts_file .. ")...")
 
 -- ----------------------------------------------------------------
 -- Helpers JSON mínimos
@@ -185,7 +186,6 @@ local function ioxm_tick()
     t, json_array(contacts)
   )
 
-  -- Escreve no arquivo (io.open está disponível no Mission environment)
   local f, err = io.open(IOXM.contacts_file, "w")
   if not f then
     env.info("[IOX-Mission] ERRO ao abrir arquivo: " .. tostring(err))
@@ -206,6 +206,5 @@ local function schedule_tick(_, time)
   return time + IOXM.update_interval
 end
 
-env.info("[IOX-Mission] Inicializando (file bridge -> " .. IOXM.contacts_file .. ")...")
 timer.scheduleFunction(schedule_tick, nil, timer.getTime() + 1)
 env.info("[IOX-Mission] Scheduler iniciado. Contacts a cada " .. IOXM.update_interval .. "s")
